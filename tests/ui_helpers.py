@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
+from typing import cast
 
 import flet as ft
 from flet.utils.validation import validate
@@ -32,12 +33,16 @@ class FakePage:
         self.window = SimpleNamespace()
         self.title = ""
         self.padding = 0
+        self.width: float | None = 1080
+        self.height: float | None = 690
         self.scroll: ft.ScrollMode | None = None
         self.theme: ft.Theme | None = None
         self.dark_theme: ft.Theme | None = None
         self.bgcolor: str | None = None
         self.theme_mode = ft.ThemeMode.SYSTEM
         self.appbar: ft.AppBar | None = None
+        self.navigation_bar: ft.NavigationBar | None = None
+        self.on_resize: Callable[[object], None] | None = None
         self.services: list[ft.Control] = []
         self.controls: list[ft.Control] = []
         self.tasks: list[asyncio.Task[None]] = []
@@ -48,7 +53,7 @@ class FakePage:
         self.update()  # Real Page.add() already sends an update.
 
     def update(self) -> None:
-        for control in walk_controls([self.controls, self.services]):
+        for control in walk_controls([self.controls, self.services, self.navigation_bar]):
             validate(control)  # Flet checks deprecated fields when sending updates.
         self.update_count += 1
 
@@ -58,3 +63,19 @@ class FakePage:
         task = asyncio.create_task(handler(*args))
         self.tasks.append(task)
         return task
+
+
+def find_control(page: FakePage, key: str) -> ft.Control:
+    for control in walk_controls([page.controls, page.navigation_bar]):
+        if control.key == key:
+            return control
+    raise AssertionError(f"Control {key!r} is not attached to the active screen.")
+
+
+def select_screen(page: FakePage, index: int) -> None:
+    key = "screen-navigation-wide" if (page.width or 430) >= 860 else "screen-navigation-mobile"
+    navigation = find_control(page, key)
+    assert isinstance(navigation, (ft.NavigationRail, ft.NavigationBar))
+    navigation.selected_index = index
+    assert navigation.on_change is not None
+    cast(Callable[[object], None], navigation.on_change)(SimpleNamespace(control=navigation))

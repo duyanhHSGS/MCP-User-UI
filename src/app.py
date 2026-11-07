@@ -40,10 +40,8 @@ def main(page: ft.Page) -> None:
     page.title = "MCP User UI · Playground"
     page.window.width = 1080
     page.window.height = 690
-    page.padding = 22
-    # The working VM-Control GUI uses a page-level scroll. Nested expanding
-    # scrollables caused blank windows in the previous client version.
-    page.scroll = ft.ScrollMode.AUTO
+    page.padding = 0
+    page.scroll = ft.ScrollMode.HIDDEN
     clipboard = ft.Clipboard()
     page.services.append(clipboard)
 
@@ -85,11 +83,15 @@ def main(page: ft.Page) -> None:
             field.color = colors.foreground
 
     endpoint = ft.TextField(
+        key="endpoint",
         label="Remote MCP endpoint", hint_text="https://server.example/mcp",
         expand=True, autofocus=True,
     )
-    token = ft.TextField(label="Bearer token · optional", password=True,
+    token = ft.TextField(key="bearer-token", label="Bearer token · optional", password=True,
                          can_reveal_password=True)
+    browser_oauth = ft.Checkbox(
+        key="browser-oauth", label="Use browser OAuth authorization", value=False,
+    )
     connect_button = ft.FilledTonalButton("Connect server", icon=ft.Icons.LINK)
     disconnect_button = ft.OutlinedButton("Disconnect", disabled=True)
     refresh_button = ft.OutlinedButton("Refresh", icon=ft.Icons.REFRESH, disabled=True)
@@ -100,20 +102,27 @@ def main(page: ft.Page) -> None:
         size=12, muted=True,
     )
     filter_box = ft.TextField(
+        key="capability-search",
         label="Search tools, prompts and resources", hint_text="Search by name or description",
         disabled=True, dense=True,
     )
-    navigation = ft.Row(spacing=8, wrap=True)
+    navigation = ft.Row(key="capability-categories", spacing=8, wrap=True)
     heading = text("Discover capabilities", size=17, bold=True)
-    list_column = ft.Column(spacing=7,
+    heading.key = "capability-heading"
+    list_column = ft.Column(key="catalog-list", spacing=7,
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-    detail_column = ft.Column(spacing=12,
+    detail_column = ft.Column(key="catalog-detail", spacing=12,
                               horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
     workspace = ft.ResponsiveRow(visible=False)
-    summary_row = ft.Row(spacing=12, wrap=True, visible=False)
+    summary_row = ft.Row(key="capability-summary", spacing=12, wrap=True, visible=False)
     empty_state = ft.Container(visible=True)
+    connection_view = ft.Column(key="connection-view", spacing=15)
+    capabilities_view = ft.Column(key="capabilities-view", spacing=15)
+    screen_host = ft.Container(key="screen-host", content=connection_view)
+    selected_tab = 0
 
     session: McpSession | None = None
+    pending_session: McpSession | None = None
     generation = 0
     loading = False
     running = False
@@ -124,7 +133,8 @@ def main(page: ft.Page) -> None:
     def update_connection() -> None:
         connected = session is not None
         endpoint.disabled = connected or loading
-        token.disabled = connected or loading
+        token.disabled = connected or loading or bool(browser_oauth.value)
+        browser_oauth.disabled = connected or loading
         connect_button.disabled = connected or loading
         disconnect_button.disabled = not connected and not loading
         refresh_button.disabled = not connected or loading or running
@@ -479,7 +489,9 @@ def main(page: ft.Page) -> None:
                 break
         page.update()
 
-    async def discover(active: McpSession) -> None:
+    async def discover(
+        active: McpSession, initial_tools: list[dict[str, object]] | None = None,
+    ) -> None:
         nonlocal catalog
         data: dict[str, list[dict[str, object]]] = {name: [] for name in CATEGORIES}
         errors: list[str] = []
@@ -491,6 +503,9 @@ def main(page: ft.Page) -> None:
         ]
         for label, capability, method, key in jobs:
             if capability not in active.capabilities:
+                continue
+            if method == "tools/list" and initial_tools is not None:
+                data[label].extend(initial_tools)
                 continue
             try:
                 data[label].extend(await active.list_items(method, key))
@@ -507,12 +522,18 @@ def main(page: ft.Page) -> None:
             connection_detail.color = colors.danger if errors else colors.muted
             draw_catalog()
 
-    async def connect_task(epoch: int, url: str, bearer: str) -> None:
-        nonlocal session, loading, category, selected_name
-        active = McpSession(url, bearer)
+    async def connect_task(epoch: int, url: str, bearer: str, use_oauth: bool) -> None:
+        nonlocal session, pending_session, loading, category, selected_name
+        if epoch != generation:
+            return
+        active = McpSession(url, "" if use_oauth else bearer, oauth=use_oauth)
+        pending_session = active
         started = time.perf_counter()
         try:
             await active.initialize()
+            initial_tools = None
+            if use_oauth and "tools" in active.capabilities:
+                initial_tools = await active.list_items("tools/list", "tools")
             if epoch != generation:
                 return
             session = active
@@ -524,7 +545,7 @@ def main(page: ft.Page) -> None:
             selected_name = None
             connection_detail.value = f"Connected in {(time.perf_counter() - started) * 1000:.0f} ms. Discovering…"
             update_connection()
-            await discover(active)
+            await discover(active, initial_tools)
         except Exception as exc:
             if epoch == generation:
                 connection_detail.value = f"Connection failed: {type(exc).__name__}: {exc}"
@@ -533,6 +554,8 @@ def main(page: ft.Page) -> None:
                     session = None
                 draw_catalog()
         finally:
+            if pending_session is active:
+                pending_session = None
             if epoch != generation or session is not active:
                 await active.close()
             if epoch == generation:
@@ -550,19 +573,24 @@ def main(page: ft.Page) -> None:
             return
         generation += 1
         loading = True
-        connection_detail.value = "Connecting and negotiating MCP protocol…"
+        use_oauth = bool(browser_oauth.value)
+        connection_detail.value = (
+            "Browser sign-in… Complete authorization if prompted, or Disconnect to cancel."
+            if use_oauth else "Connecting and negotiating MCP protocol…"
+        )
         connection_detail.color = colors.muted
         update_connection()
-        page.run_task(connect_task, generation, url, token.value or "")
+        page.run_task(connect_task, generation, url, token.value or "", use_oauth)
 
     async def disconnect_task(active: McpSession) -> None:
         await active.close()
 
     def on_disconnect() -> None:
-        nonlocal generation, session, loading, running, selected_name
+        nonlocal generation, session, pending_session, loading, running, selected_name
         generation += 1
-        active = session
+        active = session or pending_session
         session = None
+        pending_session = None
         loading = False
         running = False
         selected_name = None
@@ -618,6 +646,14 @@ def main(page: ft.Page) -> None:
         if session is not None:
             draw_catalog()
 
+    def select_screen(index: int) -> None:
+        nonlocal selected_tab
+        if index not in (0, 1):
+            return
+        selected_tab = index
+        screen_host.content = connection_view if index == 0 else capabilities_view
+        page.update()
+
     def build_ui() -> None:
         """Use watch-style tonal surfaces and one page-level scrollable layout."""
         nonlocal workspace, empty_state, input_borders
@@ -671,6 +707,7 @@ def main(page: ft.Page) -> None:
                 ft.Container(
                     content=ft.Row(
                         [palette_choice, mode_button], spacing=9,
+                        key="appearance-actions",
                         alignment=ft.MainAxisAlignment.END,
                     ),
                     col={"xs": 12, "md": 5},
@@ -702,6 +739,7 @@ def main(page: ft.Page) -> None:
                 ], spacing=12, wrap=True),
                 endpoint,
                 token,
+                browser_oauth,
                 ft.Row([
                     connect_button, disconnect_button, refresh_button, progress,
                     ft.Container(
@@ -716,12 +754,13 @@ def main(page: ft.Page) -> None:
                         bgcolor=colors.raised, border_radius=99,
                         padding=ft.Padding(12, 8, 12, 8),
                     ),
-                ], wrap=True, spacing=10, run_spacing=8),
+                ], key="connection-actions", wrap=True, spacing=10, run_spacing=8),
                 connection_detail,
             ], spacing=14,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             padding=20,
         )
+        connection_card.key = "connection-card"
 
         empty_state = panel(
             ft.Row([
@@ -761,11 +800,10 @@ def main(page: ft.Page) -> None:
                 ),
                 col={"xs": 12, "sm": 12, "md": 8, "lg": 8},
             ),
-        ], spacing=12, run_spacing=12, visible=session is not None)
+        ], key="capabilities-workspace", spacing=12, run_spacing=12, visible=session is not None)
 
-        root = ft.Column([
-            top_bar,
-            connection_card,
+        connection_view.controls = [connection_card]
+        capabilities_view.controls = [
             ft.Row([
                 icon_tile(ft.Icons.WIDGETS_OUTLINED),
                 ft.Column([
@@ -779,14 +817,52 @@ def main(page: ft.Page) -> None:
             filter_box,
             empty_state,
             workspace,
-        ], spacing=15, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        ]
+        screen_host.content = connection_view if selected_tab == 0 else capabilities_view
+        body = ft.Container(
+            content=ft.Column(
+                [top_bar, screen_host], key="page-body", spacing=15, expand=True,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            padding=22, expand=True,
+        )
+        wide = (page.width or 430) >= 860
+        destinations = (
+            ("Connection", ft.Icons.LINK_OUTLINED, ft.Icons.LINK),
+            ("Capabilities", ft.Icons.WIDGETS_OUTLINED, ft.Icons.WIDGETS),
+        )
+        page.navigation_bar = ft.NavigationBar(
+            key="screen-navigation-mobile", selected_index=selected_tab,
+            destinations=[ft.NavigationBarDestination(label=label, icon=icon, selected_icon=selected)
+                          for label, icon, selected in destinations],
+            on_change=lambda event: select_screen(event.control.selected_index or 0),
+            bgcolor=colors.surface, indicator_color=colors.accent_soft, visible=not wide,
+        )
+        if wide:
+            rail = ft.NavigationRail(
+                key="screen-navigation-wide", width=102, min_width=90,
+                height=page.height or 690, selected_index=selected_tab,
+                destinations=[ft.NavigationRailDestination(label=label, icon=icon, selected_icon=selected)
+                              for label, icon, selected in destinations],
+                label_type=ft.NavigationRailLabelType.ALL,
+                on_change=lambda event: select_screen(event.control.selected_index or 0),
+                bgcolor=colors.surface,
+            )
+            layout: ft.Control = ft.Row(
+                [rail, body], spacing=0, expand=True, vertical_alignment=ft.CrossAxisAlignment.START,
+            )
+        else:
+            layout = body
         page.controls.clear()
-        page.add(root)
+        page.add(ft.SafeArea(content=layout, expand=True))
 
     connect_button.on_click = on_connect
     disconnect_button.on_click = on_disconnect
     refresh_button.on_click = lambda: page.run_task(refresh_discovery, session) if session else None
     filter_box.on_change = draw_catalog
+    browser_oauth.on_change = update_connection
+    page.on_resize = lambda _event: build_ui()
 
     build_ui()
 

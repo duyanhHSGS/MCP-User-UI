@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from oauth_client import BrowserOAuthClient
+
 PROTOCOL_VERSION = "2025-11-25"
 MAX_REPLY_BYTES = 8_000_000
 MAX_EVENTS = 2_000
@@ -67,11 +69,19 @@ class RpcEvent:
 class McpSession:
     """One manually controlled remote MCP session; no server is launched locally."""
 
-    def __init__(self, url: str, token: str = "", *, client: httpx.AsyncClient | None = None):
+    def __init__(
+        self, url: str, token: str = "", *, client: httpx.AsyncClient | None = None,
+        oauth: bool = False,
+    ):
         self.url = validate_endpoint(url)
+        if oauth and client is not None:
+            raise ValueError("Browser OAuth cannot use a custom HTTPX client.")
+        self._oauth = BrowserOAuthClient(self.url) if oauth else None
         self._owned_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
-        self._token = token.strip()
+        self._client = None if oauth else (
+            client or httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
+        )
+        self._token = "" if oauth else token.strip()
         self._session_id: str | None = None
         self.version: str | None = None
         self.server_info: dict[str, object] = {}
@@ -157,8 +167,16 @@ class McpSession:
         if params is not None:
             message["params"] = params
         self._record("→", method, message)
+        if self._oauth is not None:
+            result = await self._oauth.request(method, params)
+            if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > MAX_REPLY_BYTES:
+                raise McpError("MCP reply exceeded the 8 MB safety limit.")
+            return self._unwrap({"jsonrpc": "2.0", "id": request_id, "result": result}, request_id, method)
+        client = self._client
+        if client is None:
+            raise McpError("MCP HTTP client is not available.")
         try:
-            async with self._client.stream(
+            async with client.stream(
                 "POST", self.url, headers=self._headers(method, params), json=message
             ) as response:
                 response.raise_for_status()
@@ -190,10 +208,15 @@ class McpSession:
             raise McpError(f"Network error while calling {method}: {exc}") from exc
 
     async def _notify_initialized(self) -> None:
+        if self._oauth is not None:
+            return  # FastMCP has already completed the handshake and notification.
         message = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         self._record("→", "notifications/initialized", message)
+        client = self._client
+        if client is None:
+            raise McpError("MCP HTTP client is not available.")
         try:
-            async with self._client.stream(
+            async with client.stream(
                 "POST", self.url, json=message,
                 headers=self._headers("notifications/initialized", None),
             ) as response:
@@ -251,11 +274,13 @@ class McpSession:
         if self._closed:
             return
         self._closed = True
-        if self._session_id:
+        if self._oauth is not None:
+            await self._oauth.close()
+        if self._session_id and self._client is not None:
             try:
                 await self._client.delete(self.url, headers=self._headers("DELETE", None), timeout=5)
             except httpx.HTTPError:
                 pass
-        if self._owned_client:
+        if self._owned_client and self._client is not None:
             await self._client.aclose()
         self._token = ""
