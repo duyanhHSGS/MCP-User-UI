@@ -147,10 +147,21 @@ async def _exercise_connected_ui() -> None:
 
     workspace = cast(ft.ResponsiveRow, root.controls[-1])
     assert workspace.visible
-    summary = cast(ft.Row, find_control(page, "capability-summary"))
-    assert summary.visible and len(summary.controls) == 3
+    with pytest.raises(AssertionError, match="not attached"):
+        find_control(page, "capability-summary")
     navigation = cast(ft.Row, find_control(page, "capability-categories"))
     assert len(navigation.controls) == 4
+    assert all(
+        isinstance(button, (ft.FilledTonalButton, ft.OutlinedButton))
+        for button in navigation.controls
+    )
+    labels = [
+        str(button.content) for button in navigation.controls
+        if isinstance(button, (ft.FilledTonalButton, ft.OutlinedButton))
+    ]
+    assert labels == [
+        "Tools  ·  1", "Prompts  ·  1", "Resources  ·  1", "Logs  ·  0",
+    ]
 
     right = cast(ft.Container, workspace.controls[1])
     detail_panel = cast(ft.Container, right.content)
@@ -970,5 +981,113 @@ def test_slow_tool_does_not_update_detached_frozen_old_result_widgets(
         assert len(server.tool_calls) == 1
         assert all(c is not output for c in detail.controls)
         assert not output.controls
+
+    asyncio.run(exercise())
+
+
+
+@pytest.mark.parametrize(("width", "height", "pinned"), [
+    (320, 800, False),
+    (430, 800, False),
+    (859, 690, False),
+    (860, 690, False),
+    (919, 690, False),
+    (920, 690, True),
+    (1080, 690, True),
+    (1280, 900, True),
+])
+def test_desktop_library_stays_pinned_while_details_scroll(
+    width: float, height: float, pinned: bool,
+) -> None:
+    """The pinned library scrolls independently; mobile keeps normal page scrolling."""
+    async def exercise() -> None:
+        page, session = await _connect()
+        root = page.controls[0]
+        page.width = width
+        page.height = height
+        assert page.on_resize is not None
+        page.on_resize(None)
+
+        workspace = cast(ft.ResponsiveRow, find_control(page, "capabilities-workspace"))
+        left_wrapper = cast(ft.Container, workspace.controls[0])
+        right_wrapper = cast(ft.Container, workspace.controls[1])
+        library_surface = cast(ft.Container, left_wrapper.content)
+        details_surface = cast(ft.Container, right_wrapper.content)
+        library_body = cast(ft.Column, library_surface.content)
+        library_list = cast(ft.Column, library_body.controls[-1])
+        details = cast(ft.Column, details_surface.content)
+
+        assert library_body.controls[0] is not library_list
+        assert library_body.controls[1] is not library_list
+        assert library_list is find_control(page, "catalog-list")
+        assert details is find_control(page, "catalog-detail")
+
+        expected_height = max(220, height - 330) if pinned else None
+        assert library_surface.height == expected_height
+        assert details_surface.height == expected_height
+        assert library_body.expand == pinned
+        assert library_list.expand == pinned
+        assert details.expand == pinned
+        assert library_list.scroll == (ft.ScrollMode.AUTO if pinned else None)
+        assert details.scroll == (ft.ScrollMode.AUTO if pinned else None)
+
+        # Scrolling support and responsive relayout must not freeze existing
+        # selection/results or create duplicate mounted controls.
+        inputs_before = list(details.controls)
+        for next_width in (1080, 430, width):
+            page.width = next_width
+            page.on_resize(None)
+            assert page.controls[0] is root
+            assert workspace.controls == [left_wrapper, right_wrapper]
+            assert library_surface.content is library_body
+            assert details_surface.content is details
+            assert details.controls == inputs_before
+        assert len(session.tool_calls) == 0
+
+    asyncio.run(exercise())
+
+
+def test_pinned_list_and_result_have_independent_scroll_after_tool_execution(
+    catalog: Catalog,
+) -> None:
+    """Long results never carry the Library panel along with their scroll."""
+    catalog["tools/list"] = [
+        {"name": f"tool_{i:03d}", "description": f"Tool #{i}",
+         "inputSchema": {"type": "object", "properties": {}}}
+        for i in range(70)
+    ]
+
+    async def exercise() -> None:
+        page, session = await _connect()
+        page.width = 1080
+        page.height = 750
+        assert page.on_resize is not None
+        page.on_resize(None)
+        library, details = _catalog_columns(page)
+        library_card = cast(ft.Container, cast(ft.ResponsiveRow,
+                            find_control(page, "capabilities-workspace")).controls[0])
+        library_surface = cast(ft.Container, library_card.content)
+        assert len(library.controls) == 70
+        assert library.scroll == ft.ScrollMode.AUTO
+        assert details.scroll == ft.ScrollMode.AUTO
+        assert library_surface.height == 420
+
+        action_row = next(
+            cast(ft.Row, control) for control in details.controls
+            if isinstance(control, ft.Row)
+            and any(isinstance(child, ft.FilledButton) for child in control.controls)
+        )
+        run = next(
+            cast(ft.FilledButton, child) for child in action_row.controls
+            if isinstance(child, ft.FilledButton)
+        )
+        _fire(run.on_click)
+        await asyncio.gather(*page.tasks)
+        assert len(session.tool_calls) == 1
+        assert library is find_control(page, "catalog-list")
+        assert details is find_control(page, "catalog-detail")
+        assert len(library.controls) == 70
+        assert library.scroll == ft.ScrollMode.AUTO
+        assert details.scroll == ft.ScrollMode.AUTO
 
     asyncio.run(exercise())

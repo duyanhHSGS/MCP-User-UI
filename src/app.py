@@ -8,6 +8,7 @@ import time
 import flet as ft
 
 from app_preferences import AppPreferences
+from iconography import CATEGORY_ICONS, NAVIGATION_ICONS, argument_icon
 from rendering import content_views, preview
 from schema_form import (
     create_fields,
@@ -19,13 +20,6 @@ from transport import McpSession, validate_endpoint
 from ui_theme import DEFAULT_BRIGHTNESS, DEFAULT_PALETTE, PALETTES, Palette
 
 CATEGORIES = ("Tools", "Prompts", "Resources", "Logs")
-CATEGORY_ICONS: dict[str, ft.IconData] = {
-    "Tools": ft.Icons.BUILD_OUTLINED,
-    "Prompts": ft.Icons.DESCRIPTION_OUTLINED,
-    "Resources": ft.Icons.FOLDER_OPEN_OUTLINED,
-    "Logs": ft.Icons.RECEIPT_LONG_OUTLINED,
-}
-
 
 def _name(item: dict[str, object], category: str) -> str:
     field = "name" if category != "Resources" else "uri"
@@ -43,7 +37,10 @@ def main(page: ft.Page) -> None:
     page.window.width = 1080
     page.window.height = 690
     page.padding = 0
-    page.scroll = ft.ScrollMode.HIDDEN
+    # ScrollMode.HIDDEN still scrolls (it only hides the scrollbar).
+    # That made the entire page, including the desktop navigation rail,
+    # move off-screen. Only the right-hand content column may scroll.
+    page.scroll = None
     clipboard = ft.Clipboard()
     page.services.append(clipboard)
 
@@ -92,16 +89,18 @@ def main(page: ft.Page) -> None:
     endpoint = ft.TextField(
         key="endpoint",
         label="Remote MCP endpoint", hint_text="https://server.example/mcp",
+        prefix_icon=ft.Icons.ALT_ROUTE_OUTLINED,
         expand=True, autofocus=True,
     )
     token = ft.TextField(key="bearer-token", label="Bearer token · optional", password=True,
+                         prefix_icon=ft.Icons.ENHANCED_ENCRYPTION_OUTLINED,
                          can_reveal_password=True)
     browser_oauth = ft.Checkbox(
         key="browser-oauth", label="Use browser OAuth authorization", value=False,
     )
-    connect_button = ft.FilledTonalButton("Connect server", icon=ft.Icons.LINK)
-    disconnect_button = ft.OutlinedButton("Disconnect", disabled=True)
-    refresh_button = ft.OutlinedButton("Refresh", icon=ft.Icons.REFRESH, disabled=True)
+    connect_button = ft.FilledTonalButton("Connect server", icon=ft.Icons.CONNECT_WITHOUT_CONTACT_OUTLINED)
+    disconnect_button = ft.OutlinedButton("Disconnect", icon=ft.Icons.LINK_OFF_OUTLINED, disabled=True)
+    refresh_button = ft.OutlinedButton("Refresh", icon=ft.Icons.SYNC_OUTLINED, disabled=True)
     progress = ft.ProgressRing(width=18, height=18, color=colors.accent, visible=False)
     status = text("Disconnected", bold=True, color=colors.muted)
     connection_detail = text(
@@ -119,7 +118,7 @@ def main(page: ft.Page) -> None:
     filter_box = ft.TextField(
         key="capability-search",
         label="Search capabilities", hint_text="Search by name or description",
-        prefix_icon=ft.Icons.SEARCH,
+        prefix_icon=ft.Icons.MANAGE_SEARCH_OUTLINED,
         disabled=True, dense=True,
     )
     navigation = ft.Row(key="capability-categories", spacing=8, wrap=True)
@@ -130,7 +129,9 @@ def main(page: ft.Page) -> None:
     detail_column = ft.Column(key="catalog-detail", spacing=12,
                               horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
     workspace = ft.ResponsiveRow(visible=False)
-    summary_row = ft.Row(key="capability-summary", spacing=12, wrap=True, visible=False)
+    library_surface: ft.Container | None = None
+    details_surface: ft.Container | None = None
+    library_contents: ft.Column | None = None
     empty_state = ft.Container(visible=True)
     connection_view = ft.Column(
         key="connection-view", spacing=15,
@@ -175,7 +176,6 @@ def main(page: ft.Page) -> None:
         progress.visible = loading
         filter_box.disabled = not connected
         workspace.visible = connected
-        summary_row.visible = connected
         empty_state.visible = not connected
         status.value = "Connecting…" if loading else "Connected" if connected else "Disconnected"
         status.color = colors.accent if connected else colors.muted
@@ -239,7 +239,7 @@ def main(page: ft.Page) -> None:
         raw_view = target.controls[-1]
         assert isinstance(raw_view, ft.ExpansionTile)
         result_technical_controls.append(raw_view)
-        copy_button = ft.OutlinedButton("Copy complete JSON result")
+        copy_button = ft.OutlinedButton("Copy complete JSON result", icon=ft.Icons.CONTENT_COPY_OUTLINED)
         copy_button.on_click = lambda: page.run_task(
             clipboard.set, json.dumps(result, ensure_ascii=False, indent=2, default=str),
         )
@@ -320,7 +320,8 @@ def main(page: ft.Page) -> None:
             label="Advanced JSON arguments", value=must_use_json,
             visible=nerd_mode or must_use_json,
         )
-        raw_input = ft.TextField(label="Arguments as JSON object", value="{}", multiline=True,
+        raw_input = ft.TextField(label="Arguments as JSON object", value="{}",
+                                 prefix_icon=ft.Icons.DATA_OBJECT_OUTLINED, multiline=True,
                                  min_lines=3, max_lines=12, visible=must_use_json)
         tint_field(raw_input)
         form_panel = ft.Column(
@@ -330,7 +331,7 @@ def main(page: ft.Page) -> None:
         current_tool_editor = (advanced, raw_input, form_panel, must_use_json)
         feedback = ft.Text("No call yet.", selectable=True, color=ft.Colors.OUTLINE, expand=True)
         output = ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-        run_button = ft.FilledButton("Run tool", icon=ft.Icons.PLAY_ARROW)
+        run_button = ft.FilledButton("Run tool", icon=ft.Icons.ELECTRIC_BOLT_OUTLINED)
 
         def toggle_mode() -> None:
             raw_input.visible = bool(advanced.value)
@@ -369,6 +370,7 @@ def main(page: ft.Page) -> None:
                                    ft.Row([run_button, feedback]), output]
         input_schema_tile = ft.ExpansionTile(
             title="Input schema", visible=nerd_mode and show_raw_json,
+            leading=ft.Icon(ft.Icons.RULE_OUTLINED, color=colors.accent),
             expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[ft.TextField(value=preview(schema), read_only=True, multiline=True,
                                    min_lines=3, max_lines=12)],
@@ -378,6 +380,7 @@ def main(page: ft.Page) -> None:
         if isinstance(item.get("outputSchema"), dict):
             output_schema_tile = ft.ExpansionTile(
                 title="Output schema", visible=nerd_mode and show_raw_json,
+                leading=ft.Icon(ft.Icons.FACT_CHECK_OUTLINED, color=colors.accent),
                 expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[ft.TextField(value=preview(item["outputSchema"]), read_only=True,
                                        multiline=True, min_lines=3, max_lines=12)],
@@ -397,13 +400,14 @@ def main(page: ft.Page) -> None:
                 name = arg["name"]
                 required = arg.get("required") is True
                 field = ft.TextField(label=f"{name}{' *' if required else ''}",
+                                     prefix_icon=argument_icon(name, "string"),
                                      hint_text=str(arg.get("description") or ""))
                 tint_field(field)
                 fields.append(field)
                 arg_fields[name] = (field, required)
         feedback = ft.Text("No prompt retrieved.", color=ft.Colors.OUTLINE, expand=True)
         output = ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-        button = ft.FilledButton("Get prompt")
+        button = ft.FilledButton("Get prompt", icon=ft.Icons.QUESTION_ANSWER_OUTLINED)
 
         def run_prompt() -> None:
             active = session
@@ -428,11 +432,11 @@ def main(page: ft.Page) -> None:
     def resource_editor(item: dict[str, object]) -> list[ft.Control]:
         uri = item.get("uri") or item.get("uriTemplate") or ""
         uri_field = ft.TextField(label="Resource URI (expand template placeholders manually)",
-                                 value=str(uri))
+                                 prefix_icon=ft.Icons.ALT_ROUTE_OUTLINED, value=str(uri))
         tint_field(uri_field)
         feedback = ft.Text("No resource retrieved.", color=colors.muted, expand=True)
         output = ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-        button = ft.FilledButton("Read resource")
+        button = ft.FilledButton("Read resource", icon=ft.Icons.AUTO_STORIES_OUTLINED)
 
         def read_resource() -> None:
             active = session
@@ -490,7 +494,6 @@ def main(page: ft.Page) -> None:
             page.update()
             return
         draw_navigation()
-        refresh_summary()
         if category == "Logs":
             heading.value = "JSON-RPC request and response log (current connection only)"
             list_column.controls.append(text(
@@ -506,6 +509,7 @@ def main(page: ft.Page) -> None:
             ))
             log_field = ft.TextField(
                 label="JSON-RPC log", value=raw[-MAX_LOG_CHARS:] or "No traffic recorded.",
+                prefix_icon=ft.Icons.TERMINAL_OUTLINED,
                 read_only=True, multiline=True, min_lines=12, max_lines=25,
             )
             tint_field(log_field)
@@ -515,7 +519,7 @@ def main(page: ft.Page) -> None:
                 if session is not None:
                     session.events.clear()
                     draw_catalog()
-            clear_button = ft.OutlinedButton("Clear log")
+            clear_button = ft.OutlinedButton("Clear log", icon=ft.Icons.DELETE_SWEEP_OUTLINED)
             clear_button.on_click = clear_log
             list_column.controls.append(clear_button)
             page.update()
@@ -530,7 +534,7 @@ def main(page: ft.Page) -> None:
                 matches.append((item, item_name))
         if not matches:
             detail_column.controls.extend([
-                icon_tile(ft.Icons.SEARCH),
+                icon_tile(ft.Icons.SEARCH_OFF_OUTLINED),
                 text("Nothing found", 17, bold=True),
                 text("Refresh discovery or try another search.", 12, muted=True),
             ])
@@ -549,7 +553,7 @@ def main(page: ft.Page) -> None:
             item_card = ft.Container(
                 content=ft.Row([
                     ft.Icon(
-                        ft.Icons.CHECK_CIRCLE if selected else ft.Icons.DATA_OBJECT,
+                        ft.Icons.CHECK_CIRCLE if selected else CATEGORY_ICONS[category],
                         size=18, color=colors.accent if selected else colors.muted,
                     ),
                     ft.Text(
@@ -696,25 +700,6 @@ def main(page: ft.Page) -> None:
             if session is active:
                 refresh_button.disabled = False
                 page.update()
-
-    def refresh_summary() -> None:
-        """Keep the displayed counts grounded in actual advertised capabilities."""
-        summary_row.controls.clear()
-        for name in CATEGORIES[:-1]:
-            summary_row.controls.append(
-                ft.Container(
-                    content=ft.Row([
-                        icon_tile(CATEGORY_ICONS[name]),
-                        ft.Column([
-                            text(str(len(catalog[name])), 22, bold=True),
-                            text(name, 11, muted=True),
-                        ], spacing=2),
-                    ], spacing=12),
-                    bgcolor=colors.surface,
-                    border=ft.Border.all(1, colors.outline),
-                    padding=14, border_radius=14, width=204,
-                )
-            )
 
     def show_settings_warning(message: str) -> None:
         settings_warning.value = message
@@ -886,6 +871,29 @@ def main(page: ft.Page) -> None:
             page.navigation_bar.selected_index = index
         page.update()
 
+    def size_workspace() -> None:
+        """Pin the desktop Library while the separate details pane scrolls.
+
+        A fixed, viewport-sized panel gives both Columns bounded scroll areas.
+        On phones those bounds disappear, so the page remains one natural scroller.
+        Only layout properties change; no mounted controls are replaced.
+        """
+        # The navigation rail takes 102px and the body has 44px of padding.
+        # A >=920px window leaves enough room for ResponsiveRow's 768px
+        # two-column breakpoint. Below that, let the panels stack and page-scroll.
+        side_by_side = (page.width or 430) >= 920
+        pane_height = max(220, (page.height or 690) - 330) if side_by_side else None
+        if library_surface is not None:
+            library_surface.height = pane_height
+        if details_surface is not None:
+            details_surface.height = pane_height
+        if library_contents is not None:
+            library_contents.expand = side_by_side
+        list_column.expand = side_by_side
+        list_column.scroll = ft.ScrollMode.AUTO if side_by_side else None
+        detail_column.expand = side_by_side
+        detail_column.scroll = ft.ScrollMode.AUTO if side_by_side else None
+
     def resize_layout() -> None:
         """Resize the existing tree; never reattach input fields or result widgets."""
         wide = (page.width or 430) >= 860
@@ -896,11 +904,13 @@ def main(page: ft.Page) -> None:
             page.navigation_bar.visible = not wide
         if header_symbol is not None:
             header_symbol.visible = (page.width or 430) >= 600
+        size_workspace()
         page.update()
 
     def build_ui() -> None:
         """Use watch-style tonal surfaces and one page-level scrollable layout."""
         nonlocal workspace, empty_state, input_borders, desktop_rail, header_symbol
+        nonlocal library_surface, details_surface, library_contents
         # TODO: Recheck these equivalent border widths when upgrading Flet.
         input_borders = {
             ft.ControlState.DEFAULT: ft.OutlineInputBorder(
@@ -921,7 +931,7 @@ def main(page: ft.Page) -> None:
         # Unlike the original two-screen layout, appearance lives on Settings
         # just as it does in the I-Bought-My-Watch app.
         page.appbar = None
-        header_symbol = icon_tile(ft.Icons.HUB, tinted=True, size=25)
+        header_symbol = icon_tile(ft.Icons.POLYMER_OUTLINED, tinted=True, size=25)
         header_symbol.visible = not compact_header
         identity_controls: list[ft.Control] = [header_symbol]
         identity_controls.append(ft.Text(
@@ -944,8 +954,8 @@ def main(page: ft.Page) -> None:
         appearance_buttons.clear()
         palette_tiles.clear()
         for label, mode, icon in (
-            ("Light", "light", ft.Icons.LIGHT_MODE),
-            ("Dark", "dark", ft.Icons.DARK_MODE),
+            ("Light", "light", ft.Icons.WB_SUNNY_OUTLINED),
+            ("Dark", "dark", ft.Icons.NIGHTLIGHT_OUTLINED),
         ):
             selected = mode == brightness
             button = ft.FilledTonalButton(
@@ -987,7 +997,7 @@ def main(page: ft.Page) -> None:
         )
         settings_controls: list[ft.Control] = [
             ft.Row([
-                icon_tile(ft.Icons.SETTINGS_OUTLINED),
+                icon_tile(ft.Icons.SETTINGS_SUGGEST_OUTLINED),
                 ft.Column([
                     text("Settings", 18, bold=True),
                     text("Customize your MCP playground.", 12, muted=True),
@@ -995,7 +1005,7 @@ def main(page: ft.Page) -> None:
             ], spacing=12),
             panel(ft.Column([
                 ft.Row([
-                    icon_tile(ft.Icons.CODE, size=19),
+                    icon_tile(ft.Icons.MODEL_TRAINING_OUTLINED, size=19),
                     text("Developer options", 16, bold=True),
                 ], spacing=10),
                 nerd_checkbox,
@@ -1008,7 +1018,7 @@ def main(page: ft.Page) -> None:
                 padding=18),
             panel(ft.Column([
                 ft.Row([
-                    icon_tile(ft.Icons.PALETTE_OUTLINED, size=19),
+                    icon_tile(ft.Icons.GRADIENT_OUTLINED, size=19),
                     text("Appearance", 16, bold=True),
                 ], spacing=10),
                 text("Display mode", 13, bold=True),
@@ -1022,7 +1032,7 @@ def main(page: ft.Page) -> None:
                 ft.OutlinedButton(
                     "Reset to default appearance",
                     key="reset-appearance",
-                    icon=ft.Icons.RESTART_ALT,
+                    icon=ft.Icons.SETTINGS_BACKUP_RESTORE_OUTLINED,
                     on_click=lambda _event=None: set_appearance(
                         palette=DEFAULT_PALETTE, mode=DEFAULT_BRIGHTNESS,
                     ),
@@ -1031,7 +1041,7 @@ def main(page: ft.Page) -> None:
                 padding=18),
             panel(ft.Column([
                 ft.Row([
-                    icon_tile(ft.Icons.INFO_OUTLINE, size=19),
+                    icon_tile(ft.Icons.FINGERPRINT_OUTLINED, size=19),
                     text("About", 16, bold=True),
                 ], spacing=10),
                 text("MCP User UI · human-operated MCP client", 13),
@@ -1056,13 +1066,11 @@ def main(page: ft.Page) -> None:
         connection_detail.color = colors.muted
         progress.color = colors.accent
         heading.color = colors.foreground
-        refresh_summary()
-        summary_row.visible = session is not None
 
         connection_card = panel(
             ft.Column([
                 ft.Row([
-                    icon_tile(ft.Icons.LINK),
+                    icon_tile(ft.Icons.SENSORS_OUTLINED),
                     ft.Column([
                         text("Connection", 17, bold=True),
                         text("Streamable HTTP · direct remote connection", 12, muted=True),
@@ -1095,7 +1103,7 @@ def main(page: ft.Page) -> None:
 
         empty_state = panel(
             ft.Row([
-                icon_tile(ft.Icons.WIDGETS_OUTLINED, size=28),
+                icon_tile(ft.Icons.SCHEMA_OUTLINED, size=28),
                 ft.Column([
                     text("Your workspace is ready", 17, bold=True),
                     text("Connect to an MCP endpoint to reveal its tools, prompts and resources.",
@@ -1106,43 +1114,43 @@ def main(page: ft.Page) -> None:
         )
         empty_state.visible = session is None
 
+        # Each desktop pane owns its scrolling; the Library stays visible while
+        # a long result scrolls on the right. The Library header itself is fixed.
+        library_contents = ft.Column([
+            ft.Row([
+                icon_tile(ft.Icons.DYNAMIC_FEED_OUTLINED, size=19),
+                ft.Column([
+                    text("Library", 15, bold=True),
+                    text("Discovered items", 11, muted=True),
+                ], spacing=3),
+            ], spacing=10),
+            ft.Divider(height=1, color=colors.outline),
+            list_column,
+        ], spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        library_surface = panel(library_contents, padding=14)
+        details_surface = panel(detail_column, padding=20)
         workspace = ft.ResponsiveRow([
             ft.Container(
-                content=panel(
-                    ft.Column([
-                        ft.Row([
-                            icon_tile(ft.Icons.LIST_ALT, size=19),
-                            ft.Column([
-                                text("Library", 15, bold=True),
-                                text("Discovered items", 11, muted=True),
-                            ], spacing=3),
-                        ], spacing=10),
-                        ft.Divider(height=1, color=colors.outline),
-                        list_column,
-                    ], spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
-                    padding=14,
-                ),
+                content=library_surface,
                 col={"xs": 12, "sm": 12, "md": 4, "lg": 4},
             ),
             ft.Container(
-                content=panel(
-                    detail_column,
-                    padding=20,
-                ),
+                content=details_surface,
                 col={"xs": 12, "sm": 12, "md": 8, "lg": 8},
             ),
-        ], key="capabilities-workspace", spacing=12, run_spacing=12, visible=session is not None)
+        ], key="capabilities-workspace", spacing=12, run_spacing=12,
+            visible=session is not None)
+        size_workspace()
 
         connection_view.controls = [connection_card]
         capabilities_view.controls = [
             ft.Row([
-                icon_tile(ft.Icons.WIDGETS_OUTLINED),
+                icon_tile(ft.Icons.DATA_EXPLORATION_OUTLINED),
                 ft.Column([
                     text("Capabilities", 18, bold=True),
                     text("Only what your server actually advertises.", 12, muted=True),
                 ], spacing=3, expand=True),
             ], spacing=12),
-            summary_row,
             navigation,
             raw_json_checkbox,
             heading,
@@ -1161,9 +1169,9 @@ def main(page: ft.Page) -> None:
         )
         wide = (page.width or 430) >= 860
         destinations = (
-            ("Connection", ft.Icons.LINK_OUTLINED, ft.Icons.LINK),
-            ("Capabilities", ft.Icons.WIDGETS_OUTLINED, ft.Icons.WIDGETS),
-            ("Settings", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS),
+            ("Connection", *NAVIGATION_ICONS["Connection"]),
+            ("Capabilities", *NAVIGATION_ICONS["Capabilities"]),
+            ("Settings", *NAVIGATION_ICONS["Settings"]),
         )
         page.navigation_bar = ft.NavigationBar(
             key="screen-navigation-mobile", selected_index=selected_tab,

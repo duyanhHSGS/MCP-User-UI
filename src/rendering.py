@@ -294,6 +294,7 @@ def content_views(payload: dict[str, object]) -> list[ft.Control]:
         views.append(ft.Text("No readable content returned by this server.", selectable=True))
     views.append(ft.ExpansionTile(
         title="Raw MCP response (JSON) · advanced",
+        leading=ft.Icon(ft.Icons.DATA_OBJECT_OUTLINED),
         expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
         controls=[ft.TextField(
             value=preview(payload), multiline=True, read_only=True,

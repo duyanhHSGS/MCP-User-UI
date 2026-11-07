@@ -17,7 +17,7 @@ def test_starts_with_a_safe_disconnected_interface() -> None:
     assert page.update_count == 1
     assert len(page.controls) == 1
     assert isinstance(page.controls[0], ft.SafeArea)
-    assert page.scroll == ft.ScrollMode.HIDDEN
+    assert page.scroll is None  # No scroll on the page that owns the pinned rail.
     assert page.theme is not None and page.theme.use_material3 is True
     assert page.dark_theme is not None and page.dark_theme.use_material3 is True
     assert page.bgcolor == PALETTES[DEFAULT_PALETTE]["dark"].background
@@ -52,7 +52,7 @@ def test_search_and_discovery_fill_the_capabilities_screen(width: float | None) 
     assert isinstance(search, ft.TextField)
     assert search.width is None and not search.expand
     assert search.label == "Search capabilities"
-    assert search.prefix_icon == ft.Icons.SEARCH
+    assert search.prefix_icon == ft.Icons.MANAGE_SEARCH_OUTLINED
     assert search.disabled
     assert isinstance(workspace, ft.ResponsiveRow)
     assert workspace.width is None
@@ -357,3 +357,41 @@ def test_nerd_mode_toggles_do_not_replace_root_or_existing_connection_state() ->
     select_screen(page, 0)
     assert find_control(page, "endpoint") is endpoint
     assert endpoint.value == "https://example.net/mcp"
+
+
+
+@pytest.mark.parametrize("width", [920, 1080, 1440])
+def test_desktop_navigation_rail_is_outside_the_scrolling_body(width: float) -> None:
+    """The global left rail must not travel with a long page or tool result."""
+    page = FakePage()
+    page.width = width
+    page.height = 800
+    main(cast(ft.Page, page))
+    outer = cast(ft.SafeArea, page.controls[0])
+    layout = cast(ft.Row, outer.content)
+    assert len(layout.controls) == 2
+    rail = cast(ft.NavigationRail, layout.controls[0])
+    assert rail.key == "screen-navigation-wide"
+    assert rail.visible
+    assert rail.height == 800
+    right = cast(ft.Container, layout.controls[1])
+    body = cast(ft.Column, right.content)
+    assert body.key == "page-body"
+    assert body.scroll == ft.ScrollMode.AUTO
+    assert rail not in body.controls
+    assert page.scroll is None  # HIDDEN would still scroll the whole page.
+
+    # The rail identity and its position in the root Row survive resizing
+    # and switching the current screen.
+    for screen in (1, 2, 0, 1):
+        select_screen(page, screen)
+        assert layout.controls[0] is rail
+        assert rail.selected_index == screen
+        assert page.scroll is None
+        assert body.scroll == ft.ScrollMode.AUTO
+    page.height = 630
+    assert page.on_resize is not None
+    page.on_resize(None)
+    assert rail.height == 630
+    assert layout.controls[0] is rail
+    assert page.scroll is None

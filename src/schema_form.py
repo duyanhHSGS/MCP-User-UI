@@ -8,6 +8,8 @@ from dataclasses import dataclass
 
 import flet as ft
 
+from iconography import argument_icon
+
 
 _SUPPORTED_KINDS = {"string", "integer", "number", "boolean", "array", "object"}
 
@@ -372,6 +374,7 @@ def create_fields(
                         value="\n".join(initial) if isinstance(initial, list)
                         and all(isinstance(item, str) for item in initial) else "",
                         hint_text="One value per line",
+                        prefix_icon=argument_icon(name, "array"),
                         multiline=True, min_lines=2, max_lines=6, dense=True,
                     )
                 else:
@@ -435,6 +438,7 @@ def create_fields(
         elif kind in ("array", "object"):
             control = ft.TextField(
                 label=f"{label} — JSON",
+                prefix_icon=argument_icon(name, str(kind)),
                 value=json.dumps(default, ensure_ascii=False) if default is not None else "",
                 hint_text=str(definition.get("description", f"Enter a JSON {kind}"))[:120],
                 multiline=True,
@@ -445,6 +449,7 @@ def create_fields(
         else:
             control = ft.TextField(
                 label=label,
+                prefix_icon=argument_icon(name, str(kind)),
                 value=str(default) if default is not None else "",
                 hint_text=str(definition.get("description", ""))[:120],
                 dense=True,
