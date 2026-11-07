@@ -58,10 +58,10 @@ def main(page: ft.Page) -> None:
     scaler.set_palette(colors, dark_mode=brightness == "dark")
     input_borders: dict[ft.ControlState, ft.InputBorder] = {}
 
-    def text(value: str, size: int = 13, *, bold: bool = False,
+    def text(value: str, size: int = 14, *, bold: bool = False,
              muted: bool = False, color: str | None = None) -> ft.Text:
         return ft.Text(
-            value, size=size, selectable=True,
+            value, size=max(14, size), selectable=True,
             weight=ft.FontWeight.W_600 if bold else ft.FontWeight.NORMAL,
             color=color or (colors.muted if muted else colors.foreground),
         )
@@ -124,10 +124,7 @@ def main(page: ft.Page) -> None:
     saving_connection = False
     progress = ft.ProgressRing(width=18, height=18, color=colors.accent, visible=False)
     status = text("Disconnected", bold=True, color=colors.muted)
-    connection_detail = text(
-        "Paste a running Streamable HTTP MCP URL. No local server is launched.",
-        size=12, muted=True,
-    )
+    connection_detail = text("", muted=True)
     raw_json_checkbox = ft.Checkbox(
         key="show-raw-json", label="Show raw JSON",
         value=False, visible=nerd_mode,
@@ -214,7 +211,7 @@ def main(page: ft.Page) -> None:
         saved_use_buttons.clear()
         saved_list.controls.clear()
         if not profiles:
-            saved_list.controls.append(text("No saved connections yet.", 12, muted=True))
+            saved_list.controls.append(text("No saved connections yet.", muted=True))
         for profile in profiles:
             use_button = ft.OutlinedButton(
                 "Connect", key=f"saved-use-{profile.identifier}",
@@ -229,12 +226,12 @@ def main(page: ft.Page) -> None:
                     # causes a Flutter ParentDataWidget error (gray card).
                     content=ft.Column([
                         ft.Text(
-                            profile.url, size=13, selectable=True,
+                            profile.url, size=14, selectable=True,
                             color=colors.foreground, weight=ft.FontWeight.W_600,
                             max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
                             tooltip=profile.url,
                         ),
-                        text(profile.auth_label, 11, muted=True),
+                        text(profile.auth_label, 14, muted=True),
                         ft.Row([
                             use_button,
                             ft.IconButton(
@@ -254,6 +251,33 @@ def main(page: ft.Page) -> None:
                 ),
             )
         scaler.apply(saved_list)
+
+    def show_credential_info() -> None:
+        """Make local-credential risks readable on demand, never tiny filler."""
+        details = ft.Column([
+            text("Saving is optional. First connect, then press Save endpoint & tokens.", 16),
+            text("Saved bearer and OAuth credentials are stored as plaintext in "
+                 "Flet's app-private DATA directory. They are not encrypted.", 16),
+            text("Do not save credentials on shared or untrusted devices.", 16),
+            text("Deleting an active saved connection disconnects it and erases "
+                 "its locally stored credentials.", 16),
+            text("Removing an OAuth login locally does not revoke its server-side "
+                 "grant. Revoke it with the provider if necessary.", 16),
+        ], spacing=13, tight=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
+        dialog = ft.AlertDialog(
+            key="credential-security-dialog",
+            modal=True,
+            title=ft.Text("Saved credential security", size=20,
+                          color=colors.foreground),
+            content=details, bgcolor=colors.surface, scrollable=True,
+            actions=[ft.TextButton(
+                "Close", key="close-credential-info",
+                on_click=lambda _event=None: page.pop_dialog(),
+            )],
+        )
+        scaler.apply(dialog)
+        page.show_dialog(dialog)
 
     def update_connection() -> None:
         connected = session is not None
@@ -566,12 +590,10 @@ def main(page: ft.Page) -> None:
             ft.Row([
                 icon_tile(chosen_icon, tinted=True),
                 ft.Column([
-                    text(category.upper() + " / SELECTED ITEM", 10, color=colors.secondary),
                     text(name, 21, bold=True),
                 ], spacing=4),
             ], spacing=12, wrap=True),
-            text(str(item.get("description") or "No description supplied by server."),
-                 12, muted=True),
+            text(str(item.get("description") or ""), 14, muted=True),
             ft.Divider(height=1, color=colors.outline),
         ])
         if category == "Tools":
@@ -598,16 +620,12 @@ def main(page: ft.Page) -> None:
         draw_navigation()
         if category == "Logs":
             heading.value = "JSON-RPC request and response log (current connection only)"
-            list_column.controls.append(text(
-                "Recent requests and responses, held only in memory.", 12, muted=True,
-            ))
             raw = "\n\n".join(
                 f"[{entry.when}] {entry.direction} {entry.method}\n{entry.payload}"
                 for entry in session.events
             )
             detail_column.controls.append(text(
-                "Traffic can include sensitive arguments. Logs stay in memory and are bounded.",
-                12, muted=True,
+                "Logs may contain sensitive data.", 14, muted=True,
             ))
             log_field = ft.TextField(
                 label="JSON-RPC log", value=raw[-MAX_LOG_CHARS:] or "No traffic recorded.",
@@ -639,7 +657,6 @@ def main(page: ft.Page) -> None:
             detail_column.controls.extend([
                 icon_tile(ft.Icons.SEARCH_OFF_OUTLINED),
                 text("Nothing found", 17, bold=True),
-                text("Refresh discovery or try another search.", 12, muted=True),
             ])
             scaler.apply(list_column, detail_column, navigation)
             page.update()
@@ -661,7 +678,7 @@ def main(page: ft.Page) -> None:
                         size=18, color=colors.accent if selected else colors.muted,
                     ),
                     ft.Text(
-                        item_name, size=12,
+                        item_name, size=14,
                         weight=ft.FontWeight.W_600 if selected else ft.FontWeight.NORMAL,
                         color=colors.foreground,
                         overflow=ft.TextOverflow.ELLIPSIS,
@@ -757,10 +774,7 @@ def main(page: ft.Page) -> None:
             save_notice.value = f"Save failed: {exc}"
             save_notice.color = colors.danger
         else:
-            save_notice.value = (
-                "Saved locally. Credentials are NOT encrypted; anyone with access "
-                "to your app data may read them. Use ✕ to forget."
-            )
+            save_notice.value = "Saved. Use ✕ to forget this connection."
             save_notice.color = colors.accent
         finally:
             saving_connection = False
@@ -1268,6 +1282,7 @@ def main(page: ft.Page) -> None:
 
         nerd_checkbox = ft.Checkbox(
             key="nerd-mode", label="Nerd mode", value=nerd_mode,
+            tooltip="Show raw JSON and advanced tool inputs.",
             on_change=lambda: set_nerd_mode(bool(nerd_checkbox.value)),
         )
         settings_controls: list[ft.Control] = [
@@ -1275,7 +1290,6 @@ def main(page: ft.Page) -> None:
                 icon_tile(ft.Icons.SETTINGS_SUGGEST_OUTLINED),
                 ft.Column([
                     text("Settings", 18, bold=True),
-                    text("Customize your MCP playground.", 12, muted=True),
                 ], spacing=3, expand=True),
             ], spacing=12),
             panel(ft.Column([
@@ -1284,11 +1298,6 @@ def main(page: ft.Page) -> None:
                     text("Developer options", 16, bold=True),
                 ], spacing=10),
                 nerd_checkbox,
-                text(
-                    "Off by default. Enable to reveal the Show raw JSON checkbox "
-                    "in Capabilities and optional advanced tool inputs.",
-                    12, muted=True,
-                ),
             ], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                 padding=18),
             panel(ft.Column([
@@ -1296,18 +1305,14 @@ def main(page: ft.Page) -> None:
                     icon_tile(ft.Icons.TEXT_FIELDS_OUTLINED, size=19),
                     text("Text & readability", 16, bold=True),
                 ], spacing=10),
-                text("Interface text size", 13, bold=True),
+                text("Interface text size", 14, bold=True),
                 ft.Row([ui_scale_slider, ui_scale_label], spacing=8),
-                text("Enlarge menus, tool names, forms, labels, and navigation.",
-                     12, muted=True),
                 ft.Divider(height=1, color=colors.outline),
-                text("Answer text size", 13, bold=True),
+                text("Answer text size", 14, bold=True),
                 ft.Row([answer_scale_slider, answer_scale_label], spacing=8),
-                text("Make Markdown answers, headings, lists, and code easier to read.",
-                     12, muted=True),
                 ft.Container(
                     content=ft.Column([
-                        text("Live preview · readable at a glance", 14, bold=True),
+                        text("Preview", 14, bold=True),
                         ft.Text("The quick brown fox jumps over the lazy dog.",
                                 key="text-scale-preview", selectable=True),
                         ft.Markdown(
@@ -1329,10 +1334,10 @@ def main(page: ft.Page) -> None:
                     icon_tile(ft.Icons.GRADIENT_OUTLINED, size=19),
                     text("Appearance", 16, bold=True),
                 ], spacing=10),
-                text("Display mode", 13, bold=True),
+                text("Display mode", 14, bold=True),
                 ft.Row(display_modes, spacing=8, wrap=True, run_spacing=8),
                 ft.Divider(height=1, color=colors.outline),
-                text("Color palette", 13, bold=True),
+                text("Color palette", 14, bold=True),
                 ft.Column(
                     palette_options, spacing=6,
                     horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -1346,20 +1351,6 @@ def main(page: ft.Page) -> None:
                     ),
                 ),
             ], spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
-                padding=18),
-            panel(ft.Column([
-                ft.Row([
-                    icon_tile(ft.Icons.FINGERPRINT_OUTLINED, size=19),
-                    text("About", 16, bold=True),
-                ], spacing=10),
-                text("MCP User UI · human-operated MCP client", 13),
-                text(
-                    "Appearance and Nerd mode are saved locally when app storage "
-                    "is available. Raw JSON viewing is off at every launch. "
-                    "Server URLs and bearer tokens are never saved in preferences.",
-                    12, muted=True,
-                ),
-            ], spacing=11, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                 padding=18),
         ]
         settings_controls.insert(2, settings_warning)
@@ -1381,7 +1372,6 @@ def main(page: ft.Page) -> None:
                     icon_tile(ft.Icons.SENSORS_OUTLINED),
                     ft.Column([
                         text("Connection", 17, bold=True),
-                        text("Streamable HTTP · direct remote connection", 12, muted=True),
                     ], spacing=3),
                 ], spacing=12, wrap=True),
                 endpoint,
@@ -1408,13 +1398,22 @@ def main(page: ft.Page) -> None:
                     text("Saved connections", 16, bold=True),
                 ], spacing=10),
                 save_connection_button,
-                text(
-                    "Credentials save ONLY when you press the button after "
-                    "connecting. Saved bearer and OAuth tokens are local plaintext "
-                    "in app-private DATA, not encrypted; never on shared machines. "
-                    "Deleting an active profile disconnects it.",
-                    12, muted=True,
-                ),
+                ft.Row([
+                    ft.Icon(ft.Icons.WARNING_AMBER_OUTLINED,
+                            color=colors.danger, size=21),
+                    ft.Text(
+                        "Saved tokens are not encrypted.",
+                        key="credential-security-warning",
+                        color=colors.foreground, size=16, expand=True,
+                    ),
+                    ft.IconButton(
+                        key="credential-security-info",
+                        icon=ft.Icons.INFO_OUTLINE,
+                        icon_color=colors.accent,
+                        tooltip="How saved credentials are stored",
+                        on_click=lambda _event=None: show_credential_info(),
+                    ),
+                ], spacing=8),
                 saved_list,
                 save_notice,
                 connection_detail,
@@ -1430,8 +1429,6 @@ def main(page: ft.Page) -> None:
                 icon_tile(ft.Icons.SCHEMA_OUTLINED, size=28),
                 ft.Column([
                     text("Your workspace is ready", 17, bold=True),
-                    text("Connect to an MCP endpoint to reveal its tools, prompts and resources.",
-                         12, muted=True),
                 ], spacing=5, expand=True),
             ], spacing=16),
             padding=24,
@@ -1445,7 +1442,6 @@ def main(page: ft.Page) -> None:
                 icon_tile(ft.Icons.DYNAMIC_FEED_OUTLINED, size=19),
                 ft.Column([
                     text("Library", 15, bold=True),
-                    text("Discovered items", 11, muted=True),
                 ], spacing=3),
             ], spacing=10),
             ft.Divider(height=1, color=colors.outline),
@@ -1472,7 +1468,6 @@ def main(page: ft.Page) -> None:
                 icon_tile(ft.Icons.DATA_EXPLORATION_OUTLINED),
                 ft.Column([
                     text("Capabilities", 18, bold=True),
-                    text("Only what your server actually advertises.", 12, muted=True),
                 ], spacing=3, expand=True),
             ], spacing=12),
             navigation,

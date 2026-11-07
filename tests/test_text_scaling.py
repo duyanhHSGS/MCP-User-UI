@@ -57,8 +57,8 @@ def test_scaler_restores_original_fonts_without_compounding_or_transform() -> No
     assert heading.size == 27
     assert natural.size == 21
     assert field.text_size == 24
-    assert field.label_style is not None and field.label_style.size == 19.5
-    assert field.hint_style is not None and field.hint_style.size == 19.5
+    assert field.label_style is not None and field.label_style.size == 21
+    assert field.hint_style is not None and field.hint_style.size == 21
     assert checkbox.label_style is not None and checkbox.label_style.size == 21
     assert markdown.md_style_sheet is not None
     assert markdown.md_style_sheet.p_text_style is not None

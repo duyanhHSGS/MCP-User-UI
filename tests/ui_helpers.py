@@ -42,6 +42,7 @@ class FakePage:
         self.theme_mode = ft.ThemeMode.SYSTEM
         self.appbar: ft.AppBar | None = None
         self.navigation_bar: ft.NavigationBar | None = None
+        self.dialog: ft.AlertDialog | None = None
         self.on_resize: Callable[[object], None] | None = None
         self.services: list[ft.Control] = []
         self.controls: list[ft.Control] = []
@@ -53,9 +54,19 @@ class FakePage:
         self.update()  # Real Page.add() already sends an update.
 
     def update(self) -> None:
-        for control in walk_controls([self.controls, self.services, self.navigation_bar]):
+        for control in walk_controls([
+            self.controls, self.services, self.navigation_bar, self.dialog,
+        ]):
             validate(control)  # Flet checks deprecated fields when sending updates.
         self.update_count += 1
+
+    def show_dialog(self, dialog: ft.AlertDialog) -> None:
+        self.dialog = dialog
+        self.update()
+
+    def pop_dialog(self) -> None:
+        self.dialog = None
+        self.update()
 
     def run_task(
         self, handler: Callable[..., Coroutine[object, object, None]], *args: object
