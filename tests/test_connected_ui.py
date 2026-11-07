@@ -341,14 +341,12 @@ def test_input_borders_preserve_palette_shape_and_focus_width(
     async def exercise() -> None:
         page, _ = await _connect()
 
-        def appearance_controls() -> ft.Row:
-            return cast(ft.Row, find_control(page, "appearance-actions"))
-
-        dropdown = cast(ft.Dropdown, appearance_controls().controls[0])
-        dropdown.value = palette
-        _fire(dropdown.on_select)
+        select_screen(page, 2)
+        option = cast(ft.ListTile, find_control(page, f"palette-{palette.lower()}"))
+        _fire(option.on_click, None)
         if mode == "light":
-            _fire(cast(ft.IconButton, appearance_controls().controls[1]).on_click)
+            _fire(cast(ft.FilledTonalButton, find_control(page, "mode-light")).on_click, None)
+        select_screen(page, 1)
 
         colors = PALETTES[palette][mode]
         tinted = [field for field in walk_controls(page.controls)
@@ -720,5 +718,257 @@ def test_tool_result_is_a_readable_answer_not_a_json_editor(
         )
         feedback = cast(ft.Text, action_row.controls[1])
         assert feedback.value.startswith("Remote tool error" if failure else "Completed")
+
+    asyncio.run(exercise())
+
+
+
+@pytest.mark.parametrize("category_index", [0, 1, 2])
+def test_nerd_mode_gates_raw_json_without_losing_existing_result(
+    catalog: Catalog, category_index: int,
+) -> None:
+    """Settings controls reveal the optional JSON tools without re-invoking the server."""
+    async def exercise() -> None:
+        page, server = await _connect()
+        raw_toggle = cast(ft.Checkbox, find_control(page, "show-raw-json"))
+        assert raw_toggle.label == "Show raw JSON"
+        assert not raw_toggle.visible and raw_toggle.value is False
+
+        navigation = cast(ft.Row, find_control(page, "capability-categories"))
+        _fire(cast(ft.OutlinedButton, navigation.controls[category_index]).on_click)
+        _, detail = _catalog_columns(page)
+        if category_index == 1:
+            prompt_input = cast(
+                ft.TextField, next(c for c in detail.controls
+                                   if isinstance(c, ft.TextField) and "topic" in str(c.label))
+            )
+            prompt_input.value = "test"
+        action_index = next(
+            i for i, control in enumerate(detail.controls)
+            if isinstance(control, ft.Row)
+            and any(isinstance(child, ft.FilledButton) for child in control.controls)
+        )
+        row = cast(ft.Row, detail.controls[action_index])
+        run = cast(ft.FilledButton, row.controls[0])
+        output = cast(ft.Column, detail.controls[action_index + 1])
+        _fire(run.on_click)
+        await asyncio.gather(*page.tasks)
+        assert output.controls
+        result_snapshot = list(output.controls)
+        raw_tile = next(
+            c for c in output.controls
+            if isinstance(c, ft.ExpansionTile)
+            and "Raw MCP response" in str(c.title)
+        )
+        copy_button = cast(ft.OutlinedButton, output.controls[-1])
+        assert not raw_tile.visible and not copy_button.visible
+        schema: ft.ExpansionTile | None = None
+        advanced: ft.Checkbox | None = None
+        if category_index == 0:
+            schema = next(
+                c for c in detail.controls
+                if isinstance(c, ft.ExpansionTile) and c.title == "Input schema"
+            )
+            advanced = cast(ft.Checkbox, detail.controls[3])
+            assert not schema.visible and not advanced.visible
+
+        recorded = (
+            len(server.tool_calls), len(server.prompt_calls), len(server.resource_reads),
+        )
+        select_screen(page, 2)
+        setting = cast(ft.Checkbox, find_control(page, "nerd-mode"))
+        assert not setting.value
+        setting.value = True
+        _fire(setting.on_change)
+        select_screen(page, 1)
+        assert raw_toggle.visible and raw_toggle.value is False
+        assert output.controls == result_snapshot
+        assert not raw_tile.visible and not copy_button.visible
+
+        raw_toggle.value = True
+        _fire(raw_toggle.on_change)
+        assert output.controls == result_snapshot
+        assert raw_tile.visible and copy_button.visible
+        if category_index == 0:
+            assert schema is not None and advanced is not None
+            assert schema.visible and advanced.visible
+
+        raw_toggle.value = False
+        _fire(raw_toggle.on_change)
+        assert not raw_tile.visible and not copy_button.visible
+        if category_index == 0:
+            assert schema is not None and advanced is not None
+            assert not schema.visible
+            assert advanced.visible  # Tool argument editor is a separate advanced option.
+
+        select_screen(page, 2)
+        setting = cast(ft.Checkbox, find_control(page, "nerd-mode"))
+        setting.value = False
+        _fire(setting.on_change)
+        select_screen(page, 1)
+        assert not raw_toggle.visible and raw_toggle.value is False
+        assert not raw_tile.visible and not copy_button.visible
+        if category_index == 0:
+            assert advanced is not None
+            assert not advanced.visible
+        assert output.controls == result_snapshot
+        assert recorded == (
+            len(server.tool_calls), len(server.prompt_calls), len(server.resource_reads),
+        )
+
+    asyncio.run(exercise())
+
+
+def test_forced_advanced_json_input_remains_usable_with_nerd_mode_off(catalog: Catalog) -> None:
+    catalog["tools/list"] = [{
+        "name": "unrepresentable",
+        "inputSchema": {
+            "type": "object", "required": ["requiredValue"],
+            "properties": {"requiredValue": {
+                "oneOf": [{"type": "string"}, {"type": "string", "minLength": 3}],
+            }},
+        },
+    }]
+
+    async def exercise() -> None:
+        page, session = await _connect()
+        _, detail = _catalog_columns(page)
+        advanced = cast(ft.Checkbox, detail.controls[3])
+        json_field = cast(ft.TextField, detail.controls[5])
+        assert advanced.visible and advanced.value is True
+        assert json_field.visible
+        assert not cast(ft.Checkbox, find_control(page, "show-raw-json")).visible
+        json_field.value = '{"requiredValue":"ok"}'
+        row = cast(ft.Row, detail.controls[6])
+        _fire(cast(ft.FilledButton, row.controls[0]).on_click)
+        await asyncio.gather(*page.tasks)
+        assert session.tool_calls == [(
+            "unrepresentable", {"requiredValue": "ok"},
+        )]
+
+    asyncio.run(exercise())
+
+
+def test_hiding_nerd_mode_closes_advanced_input_without_erasing_regular_fields() -> None:
+    async def exercise() -> None:
+        page, server = await _connect()
+        _, detail = _catalog_columns(page)
+        select_screen(page, 0)
+        plain_field = cast(ft.TextField, find_control(page, "endpoint"))
+        endpoint_value = plain_field.value
+        select_screen(page, 1)
+        form = cast(ft.Column, detail.controls[4])
+        input_field = cast(ft.TextField, form.controls[0])
+        input_field.value = "my-machine"
+        select_screen(page, 2)
+        nerd = cast(ft.Checkbox, find_control(page, "nerd-mode"))
+        nerd.value = True
+        _fire(nerd.on_change)
+        select_screen(page, 1)
+        advanced = cast(ft.Checkbox, detail.controls[3])
+        json_field = cast(ft.TextField, detail.controls[5])
+        assert advanced.visible
+        advanced.value = True
+        _fire(advanced.on_change)
+        assert json_field.visible and not form.visible
+
+        select_screen(page, 2)
+        nerd = cast(ft.Checkbox, find_control(page, "nerd-mode"))
+        nerd.value = False
+        _fire(nerd.on_change)
+        select_screen(page, 1)
+        assert not advanced.value and not advanced.visible
+        assert not json_field.visible and form.visible
+        assert input_field.value == "my-machine"
+        assert plain_field.value == endpoint_value
+        row = cast(ft.Row, detail.controls[6])
+        _fire(cast(ft.FilledButton, row.controls[0]).on_click)
+        await asyncio.gather(*page.tasks)
+        assert server.tool_calls == [("inspect_status", {"target": "my-machine"})]
+
+    asyncio.run(exercise())
+
+
+
+def test_output_schema_obeys_nerd_and_raw_json_gate(catalog: Catalog) -> None:
+    catalog["tools/list"] = [{
+        "name": "produce",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+    }]
+
+    async def exercise() -> None:
+        page, session = await _connect()
+        _, detail = _catalog_columns(page)
+        input_schema, output_schema = [
+            control for control in detail.controls
+            if isinstance(control, ft.ExpansionTile)
+            and control.title in {"Input schema", "Output schema"}
+        ]
+        assert input_schema.title == "Input schema"
+        assert output_schema.title == "Output schema"
+        assert not input_schema.visible and not output_schema.visible
+
+        select_screen(page, 2)
+        nerd = cast(ft.Checkbox, find_control(page, "nerd-mode"))
+        nerd.value = True
+        _fire(nerd.on_change)
+        select_screen(page, 1)
+        raw = cast(ft.Checkbox, find_control(page, "show-raw-json"))
+        assert raw.visible and raw.value is False
+        assert not input_schema.visible and not output_schema.visible
+
+        raw.value = True
+        _fire(raw.on_change)
+        assert input_schema.visible and output_schema.visible
+        raw.value = False
+        _fire(raw.on_change)
+        assert not input_schema.visible and not output_schema.visible
+        assert session.tool_calls == []
+
+    asyncio.run(exercise())
+
+
+
+@pytest.mark.parametrize("raise_server_error", [False, True])
+def test_slow_tool_does_not_update_detached_frozen_old_result_widgets(
+    monkeypatch: pytest.MonkeyPatch, raise_server_error: bool,
+) -> None:
+    """Switching capability mid-request must not write to unmounted controls."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_call(
+        self: StubMcpSession, name: str, arguments: dict[str, object],
+    ) -> dict[str, object]:
+        self.tool_calls.append((name, arguments))
+        started.set()
+        await release.wait()
+        if raise_server_error:
+            raise RuntimeError("Simulated server failure")
+        return {"content": [{"type": "text", "text": "Completed late"}]}
+
+    monkeypatch.setattr(StubMcpSession, "call_tool", delayed_call)
+
+    async def exercise() -> None:
+        page, server = await _connect()
+        _, detail = _catalog_columns(page)
+        row = cast(ft.Row, detail.controls[6])
+        run = cast(ft.FilledButton, row.controls[0])
+        output = cast(ft.Column, detail.controls[7])
+        _fire(run.on_click)
+        await asyncio.wait_for(started.wait(), 1)
+
+        navigation = cast(ft.Row, find_control(page, "capability-categories"))
+        _fire(cast(ft.OutlinedButton, navigation.controls[1]).on_click)
+        assert all(c is not output for c in detail.controls)
+        # Make stale controls behave like Flet controls after being removed.
+        for control in (run, output, cast(ft.Text, row.controls[1])):
+            object.__setattr__(control, "_frozen", True)
+        release.set()
+        await asyncio.gather(*page.tasks)
+        assert len(server.tool_calls) == 1
+        assert all(c is not output for c in detail.controls)
+        assert not output.controls
 
     asyncio.run(exercise())

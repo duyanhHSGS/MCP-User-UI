@@ -1,11 +1,13 @@
 """A manual MCP playground: discover, inspect and invoke remote MCP capabilities."""
 
 from collections.abc import Callable
+from dataclasses import fields, is_dataclass, replace
 import json
 import time
 
 import flet as ft
 
+from app_preferences import AppPreferences
 from rendering import content_views, preview
 from schema_form import (
     create_fields,
@@ -45,8 +47,10 @@ def main(page: ft.Page) -> None:
     clipboard = ft.Clipboard()
     page.services.append(clipboard)
 
-    theme_name = DEFAULT_PALETTE
-    brightness = DEFAULT_BRIGHTNESS
+    preferences = AppPreferences.from_flet_environment()
+    theme_name, brightness = preferences.load()
+    nerd_mode = preferences.load_nerd_mode()
+    show_raw_json = False  # Independently opt-in each time the app starts.
     colors: Palette = PALETTES[theme_name][brightness]
     input_borders: dict[ft.ControlState, ft.InputBorder] = {}
 
@@ -104,6 +108,14 @@ def main(page: ft.Page) -> None:
         "Paste a running Streamable HTTP MCP URL. No local server is launched.",
         size=12, muted=True,
     )
+    raw_json_checkbox = ft.Checkbox(
+        key="show-raw-json", label="Show raw JSON",
+        value=False, visible=nerd_mode,
+    )
+    # These are only the controls owned by the currently selected capability.
+    schema_technical_controls: list[ft.Control] = []
+    result_technical_controls: list[ft.Control] = []
+    current_tool_editor: tuple[ft.Checkbox, ft.TextField, ft.Column, bool] | None = None
     filter_box = ft.TextField(
         key="capability-search",
         label="Search capabilities", hint_text="Search by name or description",
@@ -129,8 +141,19 @@ def main(page: ft.Page) -> None:
         key="capabilities-view", spacing=15,
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
     )
+    settings_view = ft.Column(
+        key="settings-view", spacing=15,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
     screen_host = ft.Container(key="screen-host", content=connection_view)
     selected_tab = 0
+    desktop_rail: ft.NavigationRail | None = None
+    header_symbol: ft.Container | None = None
+    appearance_buttons: dict[str, ft.FilledTonalButton] = {}
+    palette_tiles: dict[str, ft.ListTile] = {}
+    settings_warning = ft.Text(
+        "", color=colors.danger, selectable=True, visible=False,
+    )
 
     session: McpSession | None = None
     pending_session: McpSession | None = None
@@ -190,13 +213,43 @@ def main(page: ft.Page) -> None:
             button.on_click = tab_handler(label)
             navigation.controls.append(button)
 
+    def update_technical_visibility() -> None:
+        exposed = nerd_mode and show_raw_json
+        for control in schema_technical_controls + result_technical_controls:
+            control.visible = exposed
+        if current_tool_editor is not None:
+            advanced, raw_input, form_panel, forced = current_tool_editor
+            advanced.visible = nerd_mode or forced
+            if not nerd_mode and not forced:
+                advanced.value = False
+                raw_input.visible = False
+                form_panel.visible = True
+
+    def toggle_raw_json() -> None:
+        nonlocal show_raw_json
+        show_raw_json = nerd_mode and raw_json_checkbox.value is True
+        update_technical_visibility()
+        page.update()
+
+    raw_json_checkbox.on_change = toggle_raw_json
+
     def display_result(result: dict[str, object], target: ft.Column) -> None:
+        result_technical_controls.clear()
         target.controls = content_views(result)
+        raw_view = target.controls[-1]
+        assert isinstance(raw_view, ft.ExpansionTile)
+        result_technical_controls.append(raw_view)
         copy_button = ft.OutlinedButton("Copy complete JSON result")
         copy_button.on_click = lambda: page.run_task(
             clipboard.set, json.dumps(result, ensure_ascii=False, indent=2, default=str),
         )
+        result_technical_controls.append(copy_button)
         target.controls.append(copy_button)
+        update_technical_visibility()
+
+    def result_target_is_current(target: ft.Column) -> bool:
+        """Never update controls detached by switching tools during a slow call."""
+        return any(control is target for control in detail_column.controls)
 
     async def invoke(
         self_session: McpSession,
@@ -234,7 +287,7 @@ def main(page: ft.Page) -> None:
                 result = await self_session.read_resource(str(params["uri"]))
             else:
                 raise ValueError("Unsupported MCP operation.")
-            if session is self_session:
+            if session is self_session and result_target_is_current(output):
                 display_result(result, output)
                 failed = result.get("isError") is True
                 feedback.value = (
@@ -243,25 +296,30 @@ def main(page: ft.Page) -> None:
                 )
                 feedback.color = ft.Colors.ERROR if failed else ft.Colors.PRIMARY
         except Exception as exc:
-            if session is self_session:
+            if session is self_session and result_target_is_current(output):
                 feedback.value = f"{type(exc).__name__}: {exc}"
                 feedback.color = ft.Colors.ERROR
         finally:
             if session is self_session:
                 running = False
-                button.disabled = False
+                if result_target_is_current(output):
+                    button.disabled = False
                 refresh_button.disabled = False
                 if category == "Logs":
                     draw_catalog()
                 page.update()
 
     def tool_editor(item: dict[str, object]) -> list[ft.Control]:
+        nonlocal current_tool_editor
         schema = _schema(item)
         fields, controls = create_fields(schema, on_change=page.update)
         for field in fields:
             tint_field(field)
         must_use_json = requires_advanced_json(schema)
-        advanced = ft.Checkbox(label="Advanced JSON arguments", value=must_use_json)
+        advanced = ft.Checkbox(
+            label="Advanced JSON arguments", value=must_use_json,
+            visible=nerd_mode or must_use_json,
+        )
         raw_input = ft.TextField(label="Arguments as JSON object", value="{}", multiline=True,
                                  min_lines=3, max_lines=12, visible=must_use_json)
         tint_field(raw_input)
@@ -269,6 +327,7 @@ def main(page: ft.Page) -> None:
             fields, spacing=12, visible=not must_use_json,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
+        current_tool_editor = (advanced, raw_input, form_panel, must_use_json)
         feedback = ft.Text("No call yet.", selectable=True, color=ft.Colors.OUTLINE, expand=True)
         output = ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         run_button = ft.FilledButton("Run tool", icon=ft.Icons.PLAY_ARROW)
@@ -308,19 +367,23 @@ def main(page: ft.Page) -> None:
         run_button.on_click = call_tool
         views: list[ft.Control] = [advanced, form_panel, raw_input,
                                    ft.Row([run_button, feedback]), output]
-        views.append(ft.ExpansionTile(
-            title="Input schema",
+        input_schema_tile = ft.ExpansionTile(
+            title="Input schema", visible=nerd_mode and show_raw_json,
             expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[ft.TextField(value=preview(schema), read_only=True, multiline=True,
                                    min_lines=3, max_lines=12)],
-        ))
+        )
+        schema_technical_controls.append(input_schema_tile)
+        views.append(input_schema_tile)
         if isinstance(item.get("outputSchema"), dict):
-            views.append(ft.ExpansionTile(
-                title="Output schema",
+            output_schema_tile = ft.ExpansionTile(
+                title="Output schema", visible=nerd_mode and show_raw_json,
                 expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[ft.TextField(value=preview(item["outputSchema"]), read_only=True,
                                        multiline=True, min_lines=3, max_lines=12)],
-            ))
+            )
+            schema_technical_controls.append(output_schema_tile)
+            views.append(output_schema_tile)
         return views
 
     def prompt_editor(item: dict[str, object]) -> list[ft.Control]:
@@ -388,7 +451,11 @@ def main(page: ft.Page) -> None:
         return [uri_field, ft.Row([button, feedback]), output]
 
     def draw_detail(item: dict[str, object]) -> None:
+        nonlocal current_tool_editor
         detail_column.controls.clear()
+        schema_technical_controls.clear()
+        result_technical_controls.clear()
+        current_tool_editor = None
         name = _name(item, category)
         chosen_icon = CATEGORY_ICONS.get(category, ft.Icons.DATA_OBJECT)
         detail_column.controls.extend([
@@ -411,9 +478,12 @@ def main(page: ft.Page) -> None:
             detail_column.controls.extend(resource_editor(item))
 
     def draw_catalog() -> None:
-        nonlocal selected_name
+        nonlocal selected_name, current_tool_editor
         list_column.controls.clear()
         detail_column.controls.clear()
+        schema_technical_controls.clear()
+        result_technical_controls.clear()
+        current_tool_editor = None
         if session is None:
             heading.value = "Connect to browse MCP capabilities."
             navigation.controls.clear()
@@ -646,30 +716,191 @@ def main(page: ft.Page) -> None:
                 )
             )
 
+    def show_settings_warning(message: str) -> None:
+        settings_warning.value = message
+        settings_warning.visible = bool(message)
+        settings_warning.color = colors.danger
+
+    def set_nerd_mode(value: bool) -> None:
+        """Update mounted settings and capability controls; never rebuild them."""
+        nonlocal nerd_mode, show_raw_json
+        nerd_mode = value
+        if not nerd_mode:
+            show_raw_json = False
+            raw_json_checkbox.value = False
+        raw_json_checkbox.visible = nerd_mode
+        update_technical_visibility()
+        error = ""
+        try:
+            preferences.save_nerd_mode(nerd_mode)
+        except OSError:
+            error = "Couldn't save Nerd mode on this device."
+        show_settings_warning(error)
+        page.update()
+
+    def repaint_appearance(previous: Palette) -> None:
+        """Recolor existing controls without removing and freezing reused widgets.
+
+        In Flet 1.x a control removed from a view can become frozen; rebuilding
+        entire pages while retaining TextFields causes runtime exceptions later.
+        Update the live tree instead, preserving text, results and callbacks.
+        """
+        mapping = {
+            getattr(previous, f.name): getattr(colors, f.name)
+            for f in fields(Palette)
+        }
+        color_attributes = {
+            "bgcolor", "color", "icon_color", "indicator_color", "divider_color",
+            "border_color", "focused_border_color", "focus_color", "hover_color",
+            "overlay_color", "fill_color", "selected_color", "cursor_color",
+            "label_color", "floating_label_color", "disabled_color",
+        }
+        visited: set[int] = set()
+
+        def recolor(node: object) -> None:
+            if id(node) in visited:
+                return
+            if isinstance(node, (str, bytes, int, float, bool, type(None))):
+                return
+            visited.add(id(node))
+            if isinstance(node, (list, tuple)):
+                for child in node:
+                    recolor(child)
+            elif isinstance(node, dict):
+                for child in node.values():
+                    recolor(child)
+            elif is_dataclass(node) and not isinstance(node, type):
+                for attribute in fields(node):
+                    if attribute.name.startswith("_"):
+                        continue
+                    current = getattr(node, attribute.name)
+                    if attribute.name == "border" and isinstance(current, ft.Border):
+                        sides: dict[str, ft.BorderSide] = {}
+                        for edge in ("left", "top", "right", "bottom"):
+                            side = getattr(current, edge)
+                            if isinstance(side, ft.BorderSide):
+                                original = side.color
+                                new_color = (
+                                    mapping.get(original, original)
+                                    if isinstance(original, str) else original
+                                )
+                                sides[edge] = replace(side, color=new_color)
+                        if sides:
+                            # A fresh border value is needed for Flet's Prop
+                            # tracking; nested in-place mutations may not patch.
+                            setattr(node, attribute.name, replace(current, **sides))
+                    elif attribute.name == "border" and isinstance(current, dict):
+                        updated: dict[object, object] = {}
+                        changed = False
+                        for state, outline in current.items():
+                            if isinstance(outline, ft.OutlineInputBorder):
+                                side = outline.side
+                                if isinstance(side, ft.BorderSide) and isinstance(side.color, str):
+                                    new_color = mapping.get(side.color, side.color)
+                                    if new_color != side.color:
+                                        outline = replace(
+                                            outline, side=replace(side, color=new_color),
+                                        )
+                                        changed = True
+                            updated[state] = outline
+                        if changed:
+                            setattr(node, attribute.name, updated)
+                    elif (
+                        attribute.name in color_attributes
+                        and isinstance(current, str)
+                        and current in mapping
+                    ):
+                        setattr(node, attribute.name, mapping[current])
+                    else:
+                        recolor(current)
+
+        recolor(page.controls)
+        recolor(page.navigation_bar)
+        for screen in (connection_view, capabilities_view, settings_view):
+            recolor(screen)
+
+        for mode, button in appearance_buttons.items():
+            active = mode == brightness
+            button.content = ("Light" if mode == "light" else "Dark") + (
+                " ✓" if active else ""
+            )
+            button.bgcolor = colors.accent_soft if active else colors.raised
+            button.color = colors.accent if active else colors.foreground
+
+        for name, tile in palette_tiles.items():
+            active = name == theme_name
+            tile.bgcolor = colors.accent_soft if active else colors.raised
+            if isinstance(tile.title, ft.Text):
+                tile.title.weight = (
+                    ft.FontWeight.W_600 if active else ft.FontWeight.NORMAL
+                )
+                tile.title.color = colors.foreground
+            if isinstance(tile.leading, ft.Container):
+                tile.leading.bgcolor = PALETTES[name][brightness].accent
+            if isinstance(tile.trailing, ft.Icon):
+                tile.trailing.icon = (
+                    ft.Icons.CHECK_CIRCLE if active
+                    else ft.Icons.RADIO_BUTTON_UNCHECKED
+                )
+                tile.trailing.color = colors.accent if active else colors.muted
+
+        page.bgcolor = colors.background
+        page.theme_mode = (
+            ft.ThemeMode.DARK if brightness == "dark" else ft.ThemeMode.LIGHT
+        )
+        page.theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
+        page.dark_theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
+        show_settings_warning("")
+        page.update()
+
     def set_appearance(*, palette: str | None = None,
                        mode: str | None = None) -> None:
-        """Switch the watch app's palette/mode without contacting the server."""
+        """Retheme in-place; do not detach, freeze or erase any live controls."""
         nonlocal theme_name, brightness, colors
+        previous = colors
         if palette is not None and palette in PALETTES:
             theme_name = palette
         if mode is not None and mode in ("light", "dark"):
             brightness = mode
         colors = PALETTES[theme_name][brightness]
-        build_ui()
-        if session is not None:
-            draw_catalog()
+        error = ""
+        try:
+            preferences.save(theme_name, brightness)
+        except OSError:
+            error = "Couldn't save appearance preferences on this device."
+        repaint_appearance(previous)
+        show_settings_warning(error)
+        if error:
+            page.update()
 
     def select_screen(index: int) -> None:
         nonlocal selected_tab
-        if index not in (0, 1):
+        screens = (connection_view, capabilities_view, settings_view)
+        if not 0 <= index < len(screens):
             return
         selected_tab = index
-        screen_host.content = connection_view if index == 0 else capabilities_view
+        screen_host.content = screens[index]
+        if desktop_rail is not None:
+            desktop_rail.selected_index = index
+        if page.navigation_bar is not None:
+            page.navigation_bar.selected_index = index
+        page.update()
+
+    def resize_layout() -> None:
+        """Resize the existing tree; never reattach input fields or result widgets."""
+        wide = (page.width or 430) >= 860
+        if desktop_rail is not None:
+            desktop_rail.visible = wide
+            desktop_rail.height = page.height or 690
+        if page.navigation_bar is not None:
+            page.navigation_bar.visible = not wide
+        if header_symbol is not None:
+            header_symbol.visible = (page.width or 430) >= 600
         page.update()
 
     def build_ui() -> None:
         """Use watch-style tonal surfaces and one page-level scrollable layout."""
-        nonlocal workspace, empty_state, input_borders
+        nonlocal workspace, empty_state, input_borders, desktop_rail, header_symbol
         # TODO: Recheck these equivalent border widths when upgrading Flet.
         input_borders = {
             ft.ControlState.DEFAULT: ft.OutlineInputBorder(
@@ -687,30 +918,12 @@ def main(page: ft.Page) -> None:
         page.dark_theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
 
         compact_header = (page.width or 430) < 600
-        palette_choice = ft.Dropdown(
-            label="Palette", width=124 if compact_header else 138,
-            dense=True, value=theme_name,
-            bgcolor=colors.raised, color=colors.foreground,
-            options=[ft.DropdownOption(key=name, text=name) for name in PALETTES],
-        )
-        palette_choice.on_select = lambda: set_appearance(
-            palette=palette_choice.value,
-        )
-        mode_button = ft.IconButton(
-            icon=ft.Icons.LIGHT_MODE if brightness == "dark" else ft.Icons.DARK_MODE,
-            icon_color=colors.accent,
-            tooltip="Switch to light mode" if brightness == "dark" else "Switch to dark mode",
-        )
-        mode_button.on_click = lambda: set_appearance(
-            mode="light" if brightness == "dark" else "dark",
-        )
-        # Keep the top toolbar in the page body: this Flet desktop build clips
-        # Page.appbar when combined with page-level scrolling.
-        # TODO: Recheck title truncation and theme reachability on physical phones.
+        # Unlike the original two-screen layout, appearance lives on Settings
+        # just as it does in the I-Bought-My-Watch app.
         page.appbar = None
-        identity_controls: list[ft.Control] = []
-        if not compact_header:
-            identity_controls.append(icon_tile(ft.Icons.HUB, tinted=True, size=25))
+        header_symbol = icon_tile(ft.Icons.HUB, tinted=True, size=25)
+        header_symbol.visible = not compact_header
+        identity_controls: list[ft.Control] = [header_symbol]
         identity_controls.append(ft.Text(
             "MCP User UI", key="app-name", expand=True,
             size=16 if compact_header else 18,
@@ -722,15 +935,117 @@ def main(page: ft.Page) -> None:
                 ft.Row(
                     identity_controls, key="app-identity", spacing=11, expand=True,
                 ),
-                ft.Row(
-                    [palette_choice, mode_button], spacing=9, tight=True,
-                    key="appearance-actions",
-                    alignment=ft.MainAxisAlignment.END,
-                ),
             ], key="app-header", spacing=12,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=13, radius=16,
         )
+
+        display_modes: list[ft.Control] = []
+        appearance_buttons.clear()
+        palette_tiles.clear()
+        for label, mode, icon in (
+            ("Light", "light", ft.Icons.LIGHT_MODE),
+            ("Dark", "dark", ft.Icons.DARK_MODE),
+        ):
+            selected = mode == brightness
+            button = ft.FilledTonalButton(
+                label + (" ✓" if selected else ""),
+                key=f"mode-{mode}",
+                icon=icon,
+                bgcolor=colors.accent_soft if selected else colors.raised,
+                color=colors.accent if selected else colors.foreground,
+                on_click=lambda _event=None, mode=mode: set_appearance(mode=mode),
+            )
+            appearance_buttons[mode] = button
+            display_modes.append(button)
+
+        palette_options: list[ft.Control] = []
+        for name in PALETTES:
+            selected = name == theme_name
+            tile = ft.ListTile(
+                key=f"palette-{name.lower()}",
+                title=text(name, 14, bold=selected),
+                leading=ft.Container(
+                    width=26, height=26, border_radius=99,
+                    bgcolor=PALETTES[name][brightness].accent,
+                ),
+                trailing=ft.Icon(
+                    ft.Icons.CHECK_CIRCLE if selected
+                    else ft.Icons.RADIO_BUTTON_UNCHECKED,
+                    color=colors.accent if selected else colors.muted,
+                ),
+                bgcolor=colors.accent_soft if selected else colors.raised,
+                on_click=lambda _event, name=name: set_appearance(palette=name),
+                dense=True,
+            )
+            palette_tiles[name] = tile
+            palette_options.append(tile)
+
+        nerd_checkbox = ft.Checkbox(
+            key="nerd-mode", label="Nerd mode", value=nerd_mode,
+            on_change=lambda: set_nerd_mode(bool(nerd_checkbox.value)),
+        )
+        settings_controls: list[ft.Control] = [
+            ft.Row([
+                icon_tile(ft.Icons.SETTINGS_OUTLINED),
+                ft.Column([
+                    text("Settings", 18, bold=True),
+                    text("Customize your MCP playground.", 12, muted=True),
+                ], spacing=3, expand=True),
+            ], spacing=12),
+            panel(ft.Column([
+                ft.Row([
+                    icon_tile(ft.Icons.CODE, size=19),
+                    text("Developer options", 16, bold=True),
+                ], spacing=10),
+                nerd_checkbox,
+                text(
+                    "Off by default. Enable to reveal the Show raw JSON checkbox "
+                    "in Capabilities and optional advanced tool inputs.",
+                    12, muted=True,
+                ),
+            ], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                padding=18),
+            panel(ft.Column([
+                ft.Row([
+                    icon_tile(ft.Icons.PALETTE_OUTLINED, size=19),
+                    text("Appearance", 16, bold=True),
+                ], spacing=10),
+                text("Display mode", 13, bold=True),
+                ft.Row(display_modes, spacing=8, wrap=True, run_spacing=8),
+                ft.Divider(height=1, color=colors.outline),
+                text("Color palette", 13, bold=True),
+                ft.Column(
+                    palette_options, spacing=6,
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                ),
+                ft.OutlinedButton(
+                    "Reset to default appearance",
+                    key="reset-appearance",
+                    icon=ft.Icons.RESTART_ALT,
+                    on_click=lambda _event=None: set_appearance(
+                        palette=DEFAULT_PALETTE, mode=DEFAULT_BRIGHTNESS,
+                    ),
+                ),
+            ], spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                padding=18),
+            panel(ft.Column([
+                ft.Row([
+                    icon_tile(ft.Icons.INFO_OUTLINE, size=19),
+                    text("About", 16, bold=True),
+                ], spacing=10),
+                text("MCP User UI · human-operated MCP client", 13),
+                text(
+                    "Appearance and Nerd mode are saved locally when app storage "
+                    "is available. Raw JSON viewing is off at every launch. "
+                    "Server URLs and bearer tokens are never saved in preferences.",
+                    12, muted=True,
+                ),
+            ], spacing=11, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                padding=18),
+        ]
+        settings_controls.insert(2, settings_warning)
+        settings_view.controls = settings_controls
 
         for field in (endpoint, token, filter_box):
             tint_field(field)
@@ -829,12 +1144,13 @@ def main(page: ft.Page) -> None:
             ], spacing=12),
             summary_row,
             navigation,
+            raw_json_checkbox,
             heading,
             filter_box,
             empty_state,
             workspace,
         ]
-        screen_host.content = connection_view if selected_tab == 0 else capabilities_view
+        screen_host.content = (connection_view, capabilities_view, settings_view)[selected_tab]
         body = ft.Container(
             content=ft.Column(
                 [top_bar, screen_host], key="page-body", spacing=15, expand=True,
@@ -847,6 +1163,7 @@ def main(page: ft.Page) -> None:
         destinations = (
             ("Connection", ft.Icons.LINK_OUTLINED, ft.Icons.LINK),
             ("Capabilities", ft.Icons.WIDGETS_OUTLINED, ft.Icons.WIDGETS),
+            ("Settings", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS),
         )
         page.navigation_bar = ft.NavigationBar(
             key="screen-navigation-mobile", selected_index=selected_tab,
@@ -855,22 +1172,20 @@ def main(page: ft.Page) -> None:
             on_change=lambda event: select_screen(event.control.selected_index or 0),
             bgcolor=colors.surface, indicator_color=colors.accent_soft, visible=not wide,
         )
-        if wide:
-            rail = ft.NavigationRail(
-                key="screen-navigation-wide", width=102, min_width=90,
-                height=page.height or 690, selected_index=selected_tab,
-                destinations=[ft.NavigationRailDestination(label=label, icon=icon, selected_icon=selected)
-                              for label, icon, selected in destinations],
-                label_type=ft.NavigationRailLabelType.ALL,
-                on_change=lambda event: select_screen(event.control.selected_index or 0),
-                bgcolor=colors.surface,
-            )
-            layout: ft.Control = ft.Row(
-                [rail, body], spacing=0, expand=True, vertical_alignment=ft.CrossAxisAlignment.START,
-            )
-        else:
-            layout = body
-        page.controls.clear()
+        desktop_rail = ft.NavigationRail(
+            key="screen-navigation-wide", width=102, min_width=90,
+            height=page.height or 690, selected_index=selected_tab,
+            destinations=[ft.NavigationRailDestination(label=label, icon=icon, selected_icon=selected)
+                          for label, icon, selected in destinations],
+            label_type=ft.NavigationRailLabelType.ALL,
+            on_change=lambda event: select_screen(event.control.selected_index or 0),
+            bgcolor=colors.surface,
+            visible=wide,
+        )
+        layout = ft.Row(
+            [desktop_rail, body], spacing=0, expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
         page.add(ft.SafeArea(content=layout, expand=True))
 
     connect_button.on_click = on_connect
@@ -878,7 +1193,7 @@ def main(page: ft.Page) -> None:
     refresh_button.on_click = lambda: page.run_task(refresh_discovery, session) if session else None
     filter_box.on_change = draw_catalog
     browser_oauth.on_change = update_connection
-    page.on_resize = lambda _event: build_ui()
+    page.on_resize = lambda _event: resize_layout()
 
     build_ui()
 
