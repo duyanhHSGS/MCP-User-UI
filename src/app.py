@@ -50,6 +50,7 @@ def main(page: ft.Page) -> None:
     theme_name = DEFAULT_PALETTE
     brightness = DEFAULT_BRIGHTNESS
     colors: Palette = PALETTES[theme_name][brightness]
+    input_borders: dict[ft.ControlState, ft.InputBorder] = {}
 
     def text(value: str, size: int = 13, *, bold: bool = False,
              muted: bool = False, color: str | None = None) -> ft.Text:
@@ -80,8 +81,7 @@ def main(page: ft.Page) -> None:
     def tint_field(field: ft.Control) -> None:
         if isinstance(field, (ft.TextField, ft.Dropdown)):
             field.bgcolor = colors.raised
-            field.border_color = colors.outline
-            field.focused_border_color = colors.accent
+            field.border = input_borders
             field.color = colors.foreground
 
     endpoint = ft.TextField(
@@ -620,7 +620,16 @@ def main(page: ft.Page) -> None:
 
     def build_ui() -> None:
         """Use watch-style tonal surfaces and one page-level scrollable layout."""
-        nonlocal workspace, empty_state
+        nonlocal workspace, empty_state, input_borders
+        # TODO: Recheck these equivalent border widths when upgrading Flet.
+        input_borders = {
+            ft.ControlState.DEFAULT: ft.OutlineInputBorder(
+                side=ft.BorderSide(width=1, color=colors.outline),
+            ),
+            ft.ControlState.FOCUSED: ft.OutlineInputBorder(
+                side=ft.BorderSide(width=2, color=colors.accent),
+            ),
+        }
         page.bgcolor = colors.background
         page.theme_mode = (
             ft.ThemeMode.DARK if brightness == "dark" else ft.ThemeMode.LIGHT

@@ -1,10 +1,28 @@
 """Shared page double for tests that inspect real Flet controls."""
 
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
+from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
 
 import flet as ft
+from flet.utils.validation import validate
+
+
+def walk_controls(value: object) -> Iterator[ft.Control]:
+    """Visit controls inside public dataclass fields without following runtime links."""
+    if isinstance(value, ft.Control):
+        yield value
+    if is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            if not field.name.startswith("_"):
+                yield from walk_controls(getattr(value, field.name))
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from walk_controls(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from walk_controls(child)
 
 
 class FakePage:
@@ -30,6 +48,8 @@ class FakePage:
         self.update()  # Real Page.add() already sends an update.
 
     def update(self) -> None:
+        for control in walk_controls([self.controls, self.services]):
+            validate(control)  # Flet checks deprecated fields when sending updates.
         self.update_count += 1
 
     def run_task(

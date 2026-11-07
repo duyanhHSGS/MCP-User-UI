@@ -9,8 +9,9 @@ import flet as ft
 import pytest
 
 import app as app_module
-from tests.ui_helpers import FakePage
+from tests.ui_helpers import FakePage, walk_controls
 from transport import RpcEvent
+from ui_theme import PALETTES
 
 Catalog = dict[str, list[dict[str, object]]]
 
@@ -316,5 +317,61 @@ def test_discovery_failures_remain_visible(monkeypatch: pytest.MonkeyPatch) -> N
         assert "Discovery warnings: prompts/list: ValueError: Discovery failed" in warning.value
         left, _ = _catalog_columns(page)
         assert _card_names(left) == ["inspect_status"]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("palette", PALETTES)
+@pytest.mark.parametrize("mode", ["dark", "light"])
+@pytest.mark.parametrize("enum_field", [False, True])
+def test_input_borders_preserve_palette_shape_and_focus_width(
+    catalog: Catalog, palette: str, mode: str, enum_field: bool,
+) -> None:
+    definition: dict[str, object] = {"type": "string"}
+    if enum_field:
+        definition["enum"] = ["one", "two"]
+    catalog["tools/list"] = [{"name": "Styled field", "inputSchema": {
+        "type": "object", "properties": {"value": definition},
+    }}]
+
+    async def exercise() -> None:
+        page, _ = await _connect()
+
+        def appearance_controls() -> ft.Row:
+            header = cast(ft.ResponsiveRow, cast(ft.Container, _root(page).controls[0]).content)
+            return cast(ft.Row, cast(ft.Container, header.controls[1]).content)
+
+        dropdown = cast(ft.Dropdown, appearance_controls().controls[0])
+        dropdown.value = palette
+        _fire(dropdown.on_select)
+        if mode == "light":
+            _fire(cast(ft.IconButton, appearance_controls().controls[1]).on_click)
+
+        colors = PALETTES[palette][mode]
+        tinted = [field for field in walk_controls(page.controls)
+                  if isinstance(field, (ft.TextField, ft.Dropdown))
+                  and field.label != "Palette"
+                  and not (isinstance(field, ft.TextField) and field.read_only)]
+        assert len(tinted) == 5  # Connection/search, form input, and advanced JSON.
+        assert any(isinstance(field, ft.Dropdown) for field in tinted) == enum_field
+        assert any(field.disabled for field in tinted)  # Connected endpoint/token.
+        for field in tinted:
+            assert field.border_color is None
+            assert field.focused_border_color is None
+            assert field.bgcolor == colors.raised
+            assert field.color == colors.foreground
+            assert isinstance(field.border, dict)
+            assert set(field.border) == {ft.ControlState.DEFAULT, ft.ControlState.FOCUSED}
+            for state, color, width in (
+                (ft.ControlState.DEFAULT, colors.outline, 1),
+                (ft.ControlState.FOCUSED, colors.accent, 2),
+            ):
+                border = field.border[state]
+                assert isinstance(border, ft.OutlineInputBorder)
+                assert border.border_radius == 4
+                assert border.gap_padding == 4
+                assert border.side is not None
+                assert border.side.color == color
+                assert border.side.width == width
 
     asyncio.run(exercise())

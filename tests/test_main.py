@@ -7,7 +7,7 @@ import flet as ft
 import pytest
 
 from app import main
-from tests.ui_helpers import FakePage
+from tests.ui_helpers import FakePage, walk_controls
 from ui_theme import DEFAULT_PALETTE, PALETTES
 
 
@@ -60,3 +60,25 @@ def test_palette_and_light_mode_update_real_material_3_surfaces(palette: str) ->
     cast(Callable[[], None], mode_button.on_click)()
     assert page.bgcolor == PALETTES[palette]["light"].background
     assert page.theme_mode == ft.ThemeMode.LIGHT
+
+
+def test_control_walker_visits_nested_controls_without_following_runtime_links() -> None:
+    text = ft.Text("Nested")
+    field = ft.TextField("Input")
+    row = ft.Row([text])
+    container = ft.Container(content=row)
+    controls = list(walk_controls({"nested": (container, [field])}))
+    assert [id(control) for control in controls] == [id(container), id(row), id(text), id(field)]
+    assert list(walk_controls(None)) == []
+    assert list(walk_controls("Not a control")) == []
+
+
+def test_fake_page_updates_validate_the_actual_outbound_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    validated: list[ft.Control] = []
+    monkeypatch.setattr("tests.ui_helpers.validate", validated.append)
+    page = FakePage()
+    text = ft.Text("Nested")
+    row = ft.Row([text])
+    page.add(row)
+    assert [id(control) for control in validated] == [id(row), id(text)]
+    assert page.update_count == 1
