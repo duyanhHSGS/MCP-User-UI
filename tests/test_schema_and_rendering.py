@@ -71,3 +71,46 @@ def test_prompt_messages_and_terminal_streams_are_visible() -> None:
     }})
     assert any(isinstance(view, ft.TextField) and view.value == "done" for view in terminal)
     assert any(isinstance(view, ft.TextField) and view.value == "warning" for view in terminal)
+
+
+@pytest.mark.parametrize("properties", [
+    {},
+    {"title": {"type": "string"}},
+    {"enabled": {"type": "boolean"}, "count": {"type": "integer"},
+     "mode": {"type": "string", "enum": ["one", "two"]}},
+    {"unsupported": {"oneOf": [{"type": "string"}]}, "title": {"type": "string"}},
+])
+def test_form_views_keep_control_identity_and_property_order(properties: dict[str, object]) -> None:
+    views, controls = create_fields({"properties": properties})
+    assert len(views) == len(controls)
+    assert all(view is control for view, control in zip(views, controls.values(), strict=True))
+    assert list(controls) == [name for name in properties if name != "unsupported"]
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "not a number"])
+def test_numeric_forms_still_reject_invalid_or_nonfinite_values(raw: str) -> None:
+    schema: dict[str, object] = {"properties": {"amount": {"type": "number"}}}
+    _, controls = create_fields(schema)
+    field = controls["amount"]
+    assert isinstance(field, ft.TextField)
+    field.value = raw
+    with pytest.raises(ValueError, match="number"):
+        form_arguments(schema, controls)
+
+
+@pytest.mark.parametrize("raw", [None, 123, "!not-base64!", "aGVsbG8=", "iVBORw0KGgo="])
+def test_invalid_pngs_remain_rejected(raw: object) -> None:
+    assert _valid_png(raw) is None
+
+
+def test_schema_patterns_still_validate_and_report_invalid_patterns() -> None:
+    schema: dict[str, object] = {"type": "object", "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z]+$"},
+    }}
+    validate_tool_arguments(schema, {"code": "MCP"})
+    with pytest.raises(ValueError, match="does not match"):
+        validate_tool_arguments(schema, {"code": "mcp"})
+    with pytest.raises(ValueError, match="invalid schema pattern"):
+        validate_tool_arguments({"type": "object", "properties": {
+            "code": {"type": "string", "pattern": "["},
+        }}, {"code": "MCP"})

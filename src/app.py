@@ -17,6 +17,12 @@ from transport import McpSession, validate_endpoint
 from ui_theme import DEFAULT_BRIGHTNESS, DEFAULT_PALETTE, PALETTES, Palette
 
 CATEGORIES = ("Tools", "Prompts", "Resources", "Logs")
+CATEGORY_ICONS: dict[str, ft.IconData] = {
+    "Tools": ft.Icons.BUILD_OUTLINED,
+    "Prompts": ft.Icons.DESCRIPTION_OUTLINED,
+    "Resources": ft.Icons.FOLDER_OPEN_OUTLINED,
+    "Logs": ft.Icons.RECEIPT_LONG_OUTLINED,
+}
 
 
 def _name(item: dict[str, object], category: str) -> str:
@@ -103,8 +109,7 @@ def main(page: ft.Page) -> None:
                             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
     detail_column = ft.Column(spacing=12,
                               horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
-    workspace = ft.Row(spacing=12, vertical_alignment=ft.CrossAxisAlignment.START,
-                       visible=False)
+    workspace = ft.ResponsiveRow(visible=False)
     summary_row = ft.Row(spacing=12, wrap=True, visible=False)
     empty_state = ft.Container(visible=True)
 
@@ -115,7 +120,6 @@ def main(page: ft.Page) -> None:
     category = "Tools"
     selected_name: str | None = None
     catalog: dict[str, list[dict[str, object]]] = {name: [] for name in CATEGORIES}
-    discovery_errors: list[str] = []
 
     def update_connection() -> None:
         connected = session is not None
@@ -150,12 +154,6 @@ def main(page: ft.Page) -> None:
         navigation.controls.clear()
         if session is None:
             return
-        icons: dict[str, ft.IconData] = {
-            "Tools": ft.Icons.BUILD_OUTLINED,
-            "Prompts": ft.Icons.DESCRIPTION_OUTLINED,
-            "Resources": ft.Icons.FOLDER_OPEN_OUTLINED,
-            "Logs": ft.Icons.RECEIPT_LONG_OUTLINED,
-        }
         for label in CATEGORIES:
             if label != "Logs" and label.lower() not in session.capabilities:
                 continue
@@ -163,22 +161,21 @@ def main(page: ft.Page) -> None:
             caption = f"{label}  ·  {count}"
             if category == label:
                 button: ft.Control = ft.FilledTonalButton(
-                    caption, icon=icons[label],
+                    caption, icon=CATEGORY_ICONS[label],
                     bgcolor=colors.accent_soft, color=colors.accent,
                 )
             else:
-                button = ft.OutlinedButton(caption, icon=icons[label])
+                button = ft.OutlinedButton(caption, icon=CATEGORY_ICONS[label])
             button.on_click = tab_handler(label)
             navigation.controls.append(button)
-        page.update()
 
     def display_result(result: dict[str, object], target: ft.Column) -> None:
         target.controls = content_views(result)
         copy_button = ft.OutlinedButton("Copy complete JSON result")
-        full_json = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-        copy_button.on_click = lambda: page.run_task(clipboard.set, full_json)
+        copy_button.on_click = lambda: page.run_task(
+            clipboard.set, json.dumps(result, ensure_ascii=False, indent=2, default=str),
+        )
         target.controls.append(copy_button)
-        page.update()
 
     async def invoke(
         self_session: McpSession,
@@ -278,7 +275,7 @@ def main(page: ft.Page) -> None:
                 else:
                     args = form_arguments(schema, controls)
                 validate_tool_arguments(schema, args)
-            except (ValueError, json.JSONDecodeError) as exc:
+            except ValueError as exc:
                 feedback.value = f"Invalid arguments: {exc}"
                 feedback.color = ft.Colors.ERROR
                 page.update()
@@ -370,11 +367,7 @@ def main(page: ft.Page) -> None:
     def draw_detail(item: dict[str, object]) -> None:
         detail_column.controls.clear()
         name = _name(item, category)
-        chosen_icon = {
-            "Tools": ft.Icons.BUILD_OUTLINED,
-            "Prompts": ft.Icons.DESCRIPTION_OUTLINED,
-            "Resources": ft.Icons.FOLDER_OPEN_OUTLINED,
-        }.get(category, ft.Icons.DATA_OBJECT)
+        chosen_icon = CATEGORY_ICONS.get(category, ft.Icons.DATA_OBJECT)
         detail_column.controls.extend([
             ft.Row([
                 icon_tile(chosen_icon, tinted=True),
@@ -393,7 +386,6 @@ def main(page: ft.Page) -> None:
             detail_column.controls.extend(prompt_editor(item))
         elif category == "Resources":
             detail_column.controls.extend(resource_editor(item))
-        page.update()
 
     def draw_catalog() -> None:
         nonlocal selected_name
@@ -436,10 +428,13 @@ def main(page: ft.Page) -> None:
             page.update()
             return
         heading.value = f"{category} · {len(catalog[category])} discovered"
-        matches = [item for item in catalog[category] if (
-            filter_box.value or "").strip().casefold() in (
-                _name(item, category) + " " + str(item.get("description") or "")
-            ).casefold()]
+        query = (filter_box.value or "").strip().casefold()
+        # TODO: Profile very large catalogs before adding a persistent search cache.
+        matches: list[tuple[dict[str, object], str]] = []
+        for item in catalog[category]:
+            item_name = _name(item, category)
+            if query in (item_name + " " + str(item.get("description") or "")).casefold():
+                matches.append((item, item_name))
         if not matches:
             detail_column.controls.extend([
                 icon_tile(ft.Icons.SEARCH),
@@ -448,11 +443,9 @@ def main(page: ft.Page) -> None:
             ])
             page.update()
             return
-        names = [_name(item, category) for item in matches]
-        if selected_name not in names:
-            selected_name = names[0]
-        for item in matches:
-            item_name = _name(item, category)
+        if not any(name == selected_name for _, name in matches):
+            selected_name = matches[0][1]
+        for item, item_name in matches:
             selected = item_name == selected_name
 
             def choose(_event: object, entry: dict[str, object] = item) -> None:
@@ -480,14 +473,14 @@ def main(page: ft.Page) -> None:
                 on_click=choose,
             )
             list_column.controls.append(item_card)
-        for item in matches:
-            if _name(item, category) == selected_name:
+        for item, item_name in matches:
+            if item_name == selected_name:
                 draw_detail(item)
                 break
         page.update()
 
     async def discover(active: McpSession) -> None:
-        nonlocal catalog, discovery_errors
+        nonlocal catalog
         data: dict[str, list[dict[str, object]]] = {name: [] for name in CATEGORIES}
         errors: list[str] = []
         jobs = [
@@ -505,7 +498,6 @@ def main(page: ft.Page) -> None:
                 errors.append(f"{method}: {type(exc).__name__}: {exc}")
         if session is active:
             catalog = data
-            discovery_errors = errors
             connection_detail.value = (
                 f"{active.server_info.get('name', 'MCP server')} · protocol {active.version} · "
                 f"{len(data['Tools'])} tools, {len(data['Prompts'])} prompts, "
@@ -597,16 +589,11 @@ def main(page: ft.Page) -> None:
     def refresh_summary() -> None:
         """Keep the displayed counts grounded in actual advertised capabilities."""
         summary_row.controls.clear()
-        definitions = (
-            ("Tools", ft.Icons.BUILD_OUTLINED),
-            ("Prompts", ft.Icons.DESCRIPTION_OUTLINED),
-            ("Resources", ft.Icons.FOLDER_OPEN_OUTLINED),
-        )
-        for name, symbol in definitions:
+        for name in CATEGORIES[:-1]:
             summary_row.controls.append(
                 ft.Container(
                     content=ft.Row([
-                        icon_tile(symbol),
+                        icon_tile(CATEGORY_ICONS[name]),
                         ft.Column([
                             text(str(len(catalog[name])), 22, bold=True),
                             text(name, 11, muted=True),
@@ -786,7 +773,6 @@ def main(page: ft.Page) -> None:
         ], spacing=15, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         page.controls.clear()
         page.add(root)
-        page.update()
 
     connect_button.on_click = on_connect
     disconnect_button.on_click = on_disconnect

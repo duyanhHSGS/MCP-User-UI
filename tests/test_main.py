@@ -1,39 +1,20 @@
 """Build the real Flet widget tree without a remote server or GUI runtime."""
 
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import cast
 
 import flet as ft
+import pytest
 
 from app import main
+from tests.ui_helpers import FakePage
 from ui_theme import DEFAULT_PALETTE, PALETTES
-
-
-class FakePage:
-    """Only the page attributes needed during synchronous app initialization."""
-
-    def __init__(self) -> None:
-        self.window = SimpleNamespace()
-        self.scroll: ft.ScrollMode | None = None
-        self.theme: ft.Theme | None = None
-        self.dark_theme: ft.Theme | None = None
-        self.bgcolor: str | None = None
-        self.theme_mode: ft.ThemeMode = ft.ThemeMode.SYSTEM
-        self.appbar: ft.AppBar | None = None
-        self.services: list[ft.Control] = []
-        self.controls: list[ft.Control] = []
-
-    def add(self, control: ft.Control) -> None:
-        self.controls.append(control)
-
-    def update(self) -> None:
-        """Only the UI tree is being inspected; no Flutter client is needed."""
 
 
 def test_starts_with_a_safe_disconnected_interface() -> None:
     page = FakePage()
     main(cast(ft.Page, page))
+    assert page.update_count == 1
     assert len(page.controls) == 1
     assert isinstance(page.controls[0], ft.Column)
     root = page.controls[0]
@@ -56,7 +37,8 @@ def test_starts_with_a_safe_disconnected_interface() -> None:
     assert not any(isinstance(control, ft.VerticalDivider) for control in workspace.controls)
 
 
-def test_palette_and_light_mode_update_real_material_3_surfaces() -> None:
+@pytest.mark.parametrize("palette", PALETTES)
+def test_palette_and_light_mode_update_real_material_3_surfaces(palette: str) -> None:
     page = FakePage()
     main(cast(ft.Page, page))
     root = cast(ft.Column, page.controls[0])
@@ -64,10 +46,10 @@ def test_palette_and_light_mode_update_real_material_3_surfaces() -> None:
     header_actions = cast(ft.Row, cast(ft.Container, header.controls[1]).content)
     palette_dropdown = header_actions.controls[0]
     assert isinstance(palette_dropdown, ft.Dropdown)
-    palette_dropdown.value = "Ember"
+    palette_dropdown.value = palette
     assert palette_dropdown.on_select is not None
     cast(Callable[[], None], palette_dropdown.on_select)()
-    assert page.bgcolor == PALETTES["Ember"]["dark"].background
+    assert page.bgcolor == PALETTES[palette]["dark"].background
 
     root = cast(ft.Column, page.controls[0])
     header = cast(ft.ResponsiveRow, cast(ft.Container, root.controls[0]).content)
@@ -76,5 +58,5 @@ def test_palette_and_light_mode_update_real_material_3_surfaces() -> None:
     assert isinstance(mode_button, ft.IconButton)
     assert mode_button.on_click is not None
     cast(Callable[[], None], mode_button.on_click)()
-    assert page.bgcolor == PALETTES["Ember"]["light"].background
+    assert page.bgcolor == PALETTES[palette]["light"].background
     assert page.theme_mode == ft.ThemeMode.LIGHT

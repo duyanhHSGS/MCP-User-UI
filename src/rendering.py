@@ -6,7 +6,7 @@ import io
 import json
 
 import flet as ft
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 MAX_DISPLAY = 40_000
 MAX_IMAGE_BYTES = 10_000_000
@@ -31,7 +31,7 @@ def _valid_png(raw: object) -> bytes | None:
                 return None
             picture.verify()
         return image
-    except (binascii.Error, OSError, ValueError, UnidentifiedImageError):
+    except (binascii.Error, OSError, ValueError):
         return None
 
 

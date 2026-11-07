@@ -1,6 +1,8 @@
 """Small JSON Schema form adapter for explicitly human-triggered MCP calls."""
 
 import json
+import math
+import re
 from collections.abc import Mapping
 
 import flet as ft
@@ -119,8 +121,6 @@ def validate_json_value(value: object, definition: Mapping[str, object], path: s
     if kind == "string" and isinstance(value, str):
         pattern = definition.get("pattern")
         if isinstance(pattern, str):
-            import re
-
             try:
                 matches = re.search(pattern, value) is not None
             except re.error as exc:
@@ -197,7 +197,7 @@ def form_arguments(
                 value = float(raw)
             except ValueError as exc:
                 raise ValueError(f"{name}: enter a number.") from exc
-            if not __import__("math").isfinite(value):
+            if not math.isfinite(value):
                 raise ValueError(f"{name}: number must be finite.")
         else:
             continue
@@ -213,7 +213,6 @@ def create_fields(
     required = schema.get("required", [])
     names = required if isinstance(required, list) else []
     controls: dict[str, ft.TextField | ft.Checkbox | ft.Dropdown] = {}
-    views: list[ft.Control] = []
     for name, definition in supported_fields(schema):
         kind = definition["type"]
         default = definition.get("default")
@@ -261,9 +260,4 @@ def create_fields(
                 dense=True,
             )
         controls[name] = control
-        views.append(control)
-    return views, controls
-
-
-def to_json_text(values: Mapping[str, object]) -> str:
-    return json.dumps(values, ensure_ascii=False, indent=2)
+    return list(controls.values()), controls
