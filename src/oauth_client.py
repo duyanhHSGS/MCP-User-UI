@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from contextlib import suppress
+from pathlib import Path
 from types import TracebackType
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol, SupportsFloat
+
+from key_value.aio._utils.sanitization import AlwaysHashStrategy
+from key_value.aio.stores.filetree import FileTreeStore
+from key_value.aio.stores.memory import MemoryStore
 
 
 class WireResult(Protocol):
@@ -34,23 +40,81 @@ class OAuthClient(Protocol):
     async def read_resource_mcp(self, uri: str) -> WireResult: ...
 
 
-def create_oauth_client(url: str) -> OAuthClient:
-    """Load the client only for browser login; public/bearer connections stay light."""
+def create_oauth_client(
+    url: str, *, token_store: MemoryStore | FileTreeStore,
+) -> OAuthClient:
+    """Explicit OAuth token backend; never persist credentials until opted in."""
     try:
         from fastmcp import Client
+        from fastmcp.client.auth import OAuth
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Browser login needs fastmcp-slim[client]. Install the project's runtime requirements."
         ) from exc
     # TODO: Verify packaged Android/iOS browser callbacks on physical devices.
-    return Client(url, auth="oauth", mode="legacy", timeout=30, init_timeout=330)
+    return Client(
+        url,
+        auth=OAuth(mcp_url=url, token_storage=token_store),
+        mode="legacy",
+        timeout=30,
+        init_timeout=330,
+    )
+
+
+def private_oauth_store(directory: Path) -> FileTreeStore:
+    """OAuth secrets are local plaintext, guarded by private POSIX directories."""
+    directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.parent.chmod(0o700)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.chmod(0o700)
+    # FastMCP keys contain entire URLs; hashing prevents path separators,
+    # traversal, and leaking endpoint/query secrets in filenames.
+    return FileTreeStore(
+        data_directory=directory,
+        key_sanitization_strategy=AlwaysHashStrategy(),
+    )
+
+
+class OptInOAuthMemoryStore(MemoryStore):
+    """Keep OAuth ephemeral until Save, then mirror refreshes immediately to DATA."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._disk: FileTreeStore | None = None
+
+    def enable_disk(self, disk: FileTreeStore) -> None:
+        self._disk = disk
+
+    def disable_disk(self) -> None:
+        self._disk = None
+
+    async def put(
+        self, key: str, value: Mapping[str, Any], *,
+        collection: str | None = None, ttl: SupportsFloat | None = None,
+    ) -> None:
+        await super().put(key, value, collection=collection, ttl=ttl)
+        if self._disk is not None:
+            await self._disk.put(key, value, collection=collection, ttl=ttl)
+
+    async def delete(self, key: str, *, collection: str | None = None) -> bool:
+        deleted = await super().delete(key, collection=collection)
+        if self._disk is not None:
+            removed = await self._disk.delete(key, collection=collection)
+            return deleted or removed
+        return deleted
 
 
 class BrowserOAuthClient:
     """Delegate OAuth, token refresh, and MCP requests to FastMCP."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, stored_tokens: Path | None = None) -> None:
         self.url = url
+        # A brand-new login stays memory-only until Save is explicitly pressed.
+        self._store: OptInOAuthMemoryStore | FileTreeStore = (
+            private_oauth_store(stored_tokens) if stored_tokens is not None
+            else OptInOAuthMemoryStore()
+        )
+        self._saved_directory = stored_tokens
         self._client: OAuthClient | None = None
         self._task: asyncio.Task[None] | None = None
         self._ready = asyncio.Event()
@@ -60,7 +124,7 @@ class BrowserOAuthClient:
 
     async def _run(self) -> None:
         try:
-            async with create_oauth_client(self.url) as client:
+            async with create_oauth_client(self.url, token_store=self._store) as client:
                 self._client = client
                 self._ready.set()
                 await self._stop.wait()
@@ -123,6 +187,39 @@ class BrowserOAuthClient:
             raise RuntimeError("The server did not complete MCP initialization.")
         return result.model_dump(mode="json", by_alias=True, exclude_none=True)
 
+    async def persist_credentials(self, directory: Path) -> None:
+        """Copy FastMCP OAuth token, client registration and expiry to DATA.
+
+        On a successful opt-in, existing in-memory tokens are copied to disk.
+        Later renewals mirror to disk immediately, including rotated refresh
+        tokens. Loaded profiles use their FileTreeStore directly.
+        """
+        from fastmcp.client.auth.oauth import TokenStorageAdapter
+
+        if self._saved_directory == directory and isinstance(self._store, FileTreeStore):
+            return
+        source = TokenStorageAdapter(async_key_value=self._store, server_url=self.url)
+        tokens = await source.get_tokens()
+        if tokens is None:
+            raise ValueError("No OAuth credentials available yet. Finish browser sign-in first.")
+        destination_store = private_oauth_store(directory)
+        dest = TokenStorageAdapter(async_key_value=destination_store, server_url=self.url)
+        client_info = await source.get_client_info()
+        if client_info is not None:
+            await dest.set_client_info(client_info)
+        await dest.set_tokens(tokens)
+        expires_at = await source.get_token_expiry()
+        if expires_at is not None:
+            await destination_store.put(
+                f"{self.url}/token_expiry",
+                {"expires_at": expires_at},
+                collection="mcp-oauth-token-expiry",
+                ttl=365 * 24 * 60 * 60,
+            )
+        if isinstance(self._store, OptInOAuthMemoryStore):
+            self._store.enable_disk(destination_store)
+        self._saved_directory = directory
+
     async def close(self) -> None:
         self._closed = True
         self._stop.set()
@@ -131,3 +228,12 @@ class BrowserOAuthClient:
                 self._task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._task
+        if self._saved_directory is not None and isinstance(self._store, OptInOAuthMemoryStore):
+            # Catch any provider writes that completed before mirroring was enabled.
+            await self.persist_credentials(self._saved_directory)
+
+    def stop_persisting(self) -> None:
+        """Stop writing credentials immediately when a saved profile is deleted."""
+        self._saved_directory = None
+        if isinstance(self._store, OptInOAuthMemoryStore):
+            self._store.disable_disk()

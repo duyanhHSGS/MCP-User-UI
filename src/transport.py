@@ -8,6 +8,7 @@ import base64
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import time
 from urllib.parse import urlsplit
 
@@ -72,11 +73,15 @@ class McpSession:
     def __init__(
         self, url: str, token: str = "", *, client: httpx.AsyncClient | None = None,
         oauth: bool = False,
+        oauth_store_path: Path | None = None,
     ):
         self.url = validate_endpoint(url)
         if oauth and client is not None:
             raise ValueError("Browser OAuth cannot use a custom HTTPX client.")
-        self._oauth = BrowserOAuthClient(self.url) if oauth else None
+        self._oauth = (
+            BrowserOAuthClient(self.url, stored_tokens=oauth_store_path)
+            if oauth else None
+        )
         self._owned_client = client is None
         self._client = None if oauth else (
             client or httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
@@ -269,6 +274,15 @@ class McpSession:
 
     async def read_resource(self, uri: str) -> dict[str, object]:
         return await self._post("resources/read", {"uri": uri})
+
+    async def save_oauth_credentials(self, directory: Path) -> None:
+        if self._oauth is None:
+            raise ValueError("This connection does not use browser OAuth.")
+        await self._oauth.persist_credentials(directory)
+
+    def stop_oauth_persistence(self) -> None:
+        if self._oauth is not None:
+            self._oauth.stop_persisting()
 
     async def close(self) -> None:
         if self._closed:

@@ -8,6 +8,7 @@ import time
 import flet as ft
 
 from app_preferences import AppPreferences
+from saved_connections import SavedConnection, SavedConnectionStore, StorageAreas
 from typography import DEFAULT_TEXT_SCALE, TypographyScaler, readable_markdown_style, typography_theme
 from iconography import CATEGORY_ICONS, NAVIGATION_ICONS, argument_icon
 from rendering import content_views, preview
@@ -46,6 +47,7 @@ def main(page: ft.Page) -> None:
     page.services.append(clipboard)
 
     preferences = AppPreferences.from_flet_environment()
+    saved_store = SavedConnectionStore(StorageAreas.from_flet_environment())
     theme_name, brightness = preferences.load()
     nerd_mode = preferences.load_nerd_mode()
     ui_percent, answer_percent = preferences.load_text_scales()
@@ -106,6 +108,20 @@ def main(page: ft.Page) -> None:
     connect_button = ft.FilledTonalButton("Connect server", icon=ft.Icons.CONNECT_WITHOUT_CONTACT_OUTLINED)
     disconnect_button = ft.OutlinedButton("Disconnect", icon=ft.Icons.LINK_OFF_OUTLINED, disabled=True)
     refresh_button = ft.OutlinedButton("Refresh", icon=ft.Icons.SYNC_OUTLINED, disabled=True)
+    save_connection_button = ft.FilledTonalButton(
+        "Save endpoint & tokens", key="save-connection",
+        icon=ft.Icons.BOOKMARK_ADD_OUTLINED, disabled=True,
+        bgcolor=colors.raised, color=colors.muted,
+    )
+    saved_list = ft.Column(
+        key="saved-connections", spacing=9,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    save_notice = ft.Text(
+        "", key="save-connection-notice", selectable=True,
+        color=colors.muted,
+    )
+    saving_connection = False
     progress = ft.ProgressRing(width=18, height=18, color=colors.accent, visible=False)
     status = text("Disconnected", bold=True, color=colors.muted)
     connection_detail = text(
@@ -183,6 +199,53 @@ def main(page: ft.Page) -> None:
     category = "Tools"
     selected_name: str | None = None
     catalog: dict[str, list[dict[str, object]]] = {name: [] for name in CATEGORIES}
+    saved_snapshot: tuple[SavedConnection, ...] | None = None
+    saved_use_buttons: list[ft.OutlinedButton] = []
+
+    def refresh_saved_connections() -> None:
+        """Keep mounted saved rows stable across status updates and resizes."""
+        nonlocal saved_snapshot
+        profiles = tuple(saved_store.list())
+        if profiles == saved_snapshot:
+            for button in saved_use_buttons:
+                button.disabled = session is not None or loading
+            return
+        saved_snapshot = profiles
+        saved_use_buttons.clear()
+        saved_list.controls.clear()
+        if not profiles:
+            saved_list.controls.append(text("No saved connections yet.", 12, muted=True))
+        for profile in profiles:
+            use_button = ft.OutlinedButton(
+                "Connect", key=f"saved-use-{profile.identifier}",
+                icon=ft.Icons.LINK_OUTLINED,
+                disabled=session is not None or loading,
+                on_click=lambda _event=None, p=profile: use_saved_connection(p),
+            )
+            saved_use_buttons.append(use_button)
+            saved_list.controls.append(
+                ft.Container(
+                    content=ft.Row([
+                        ft.Column([
+                            text(profile.url, 13, bold=True),
+                            text(profile.auth_label, 11, muted=True),
+                        ], spacing=3, expand=True),
+                        use_button,
+                        ft.IconButton(
+                            icon=ft.Icons.CLOSE_OUTLINED,
+                            key=f"saved-remove-{profile.identifier}",
+                            icon_color=colors.danger,
+                            tooltip="Delete saved endpoint and credentials",
+                            on_click=lambda _event=None, p=profile: page.run_task(
+                                remove_saved_connection, p,
+                            ),
+                        ),
+                    ], spacing=8, wrap=True),
+                    padding=12, border_radius=12,
+                    bgcolor=colors.raised, border=ft.Border.all(1, colors.outline),
+                ),
+            )
+        scaler.apply(saved_list)
 
     def update_connection() -> None:
         connected = session is not None
@@ -192,6 +255,9 @@ def main(page: ft.Page) -> None:
         connect_button.disabled = connected or loading
         disconnect_button.disabled = not connected and not loading
         refresh_button.disabled = not connected or loading or running
+        save_connection_button.disabled = not connected or loading or saving_connection
+        save_connection_button.bgcolor = colors.accent if connected else colors.raised
+        save_connection_button.color = colors.background if connected else colors.muted
         progress.visible = loading
         filter_box.disabled = not connected
         workspace.visible = connected
@@ -199,6 +265,7 @@ def main(page: ft.Page) -> None:
         status.value = "Connecting…" if loading else "Connected" if connected else "Disconnected"
         status.color = colors.accent if connected else colors.muted
         progress.color = colors.accent
+        refresh_saved_connections()
         page.update()
 
     def set_category(next_category: str) -> None:
@@ -632,16 +699,97 @@ def main(page: ft.Page) -> None:
                 + ("Discovery warnings: " + "; ".join(errors) if errors else "")
             )
             connection_detail.color = colors.danger if errors else colors.muted
+            saved_store.remember_discovery(
+                active.url, tools=len(data["Tools"]),
+                prompts=len(data["Prompts"]), resources=len(data["Resources"]),
+            )
             draw_catalog()
+
+    def use_saved_connection(profile: SavedConnection) -> None:
+        """One click fills all fields and starts a new connection, never a tool."""
+        if session is not None or loading:
+            return
+        endpoint.value = profile.url
+        browser_oauth.value = profile.oauth
+        token.value = profile.bearer
+        save_notice.value = ""
+        on_connect()
+
+    async def save_current_connection() -> None:
+        """Credentials become persistent only after this explicit user click."""
+        nonlocal saving_connection
+        active = session
+        if active is None or loading or saving_connection:
+            return
+        saving_connection = True
+        update_connection()
+        use_oauth = bool(browser_oauth.value)
+        oauth_was_saved = False
+        url: str | None = None
+        try:
+            url = validate_endpoint(endpoint.value or "")
+            if use_oauth:
+                oauth_was_saved = saved_store.has_oauth_credentials(url)
+                directory = saved_store.oauth_directory(url)
+                await active.save_oauth_credentials(directory)
+            saved_store.save(url, oauth=use_oauth, bearer=token.value or "")
+        except (OSError, ValueError, RuntimeError) as exc:
+            # A partially failed opt-in must not leave unlisted OAuth secrets.
+            if use_oauth and url is not None and not oauth_was_saved:
+                active.stop_oauth_persistence()
+                try:
+                    saved_store.discard_oauth_credentials(url)
+                except OSError:
+                    pass
+            save_notice.value = f"Save failed: {exc}"
+            save_notice.color = colors.danger
+        else:
+            save_notice.value = (
+                "Saved locally. Credentials are NOT encrypted; anyone with access "
+                "to your app data may read them. Use ✕ to forget."
+            )
+            save_notice.color = colors.accent
+        finally:
+            saving_connection = False
+            update_connection()
+
+    async def remove_saved_connection(profile: SavedConnection) -> None:
+        """Forget saved credentials at any time, including an active login."""
+        active = session
+        if active is not None and (
+            active.url == profile.url and bool(browser_oauth.value) == profile.oauth
+        ):
+            if profile.oauth:
+                active.stop_oauth_persistence()
+            on_disconnect()
+            await active.close()
+        try:
+            saved_store.delete(profile)
+        except OSError as exc:
+            save_notice.value = f"Couldn't delete saved credentials: {exc}"
+            save_notice.color = colors.danger
+        else:
+            save_notice.value = "Saved endpoint and its stored credentials deleted."
+            save_notice.color = colors.muted
+        refresh_saved_connections()
+        page.update()
 
     async def connect_task(epoch: int, url: str, bearer: str, use_oauth: bool) -> None:
         nonlocal session, pending_session, loading, category, selected_name
         if epoch != generation:
             return
-        active = McpSession(url, "" if use_oauth else bearer, oauth=use_oauth)
-        pending_session = active
+        active: McpSession | None = None
         started = time.perf_counter()
         try:
+            oauth_directory = (
+                saved_store.oauth_directory(url)
+                if use_oauth and saved_store.has_oauth_credentials(url) else None
+            )
+            if oauth_directory is not None:
+                active = McpSession(url, "", oauth=True, oauth_store_path=oauth_directory)
+            else:
+                active = McpSession(url, "" if use_oauth else bearer, oauth=use_oauth)
+            pending_session = active
             await active.initialize()
             initial_tools = None
             if use_oauth and "tools" in active.capabilities:
@@ -662,14 +810,15 @@ def main(page: ft.Page) -> None:
             if epoch == generation:
                 connection_detail.value = f"Connection failed: {type(exc).__name__}: {exc}"
                 connection_detail.color = colors.danger
-                if session is active:
+                if active is not None and session is active:
                     session = None
                 draw_catalog()
         finally:
-            if pending_session is active:
-                pending_session = None
-            if epoch != generation or session is not active:
-                await active.close()
+            if active is not None:
+                if pending_session is active:
+                    pending_session = None
+                if epoch != generation or session is not active:
+                    await active.close()
             if epoch == generation:
                 loading = False
                 update_connection()
@@ -1225,12 +1374,28 @@ def main(page: ft.Page) -> None:
                         padding=ft.Padding(12, 8, 12, 8),
                     ),
                 ], key="connection-actions", wrap=True, spacing=10, run_spacing=8),
+                ft.Divider(height=1, color=colors.outline),
+                ft.Row([
+                    icon_tile(ft.Icons.BOOKMARKS_OUTLINED, size=19),
+                    text("Saved connections", 16, bold=True),
+                ], spacing=10),
+                save_connection_button,
+                text(
+                    "Credentials save ONLY when you press the button after "
+                    "connecting. Saved bearer and OAuth tokens are local plaintext "
+                    "in app-private DATA, not encrypted; never on shared machines. "
+                    "Deleting an active profile disconnects it.",
+                    12, muted=True,
+                ),
+                saved_list,
+                save_notice,
                 connection_detail,
             ], spacing=14,
                 horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
             padding=20,
         )
         connection_card.key = "connection-card"
+        refresh_saved_connections()
 
         empty_state = panel(
             ft.Row([
@@ -1331,6 +1496,9 @@ def main(page: ft.Page) -> None:
         scaler.apply(layout, page.navigation_bar)
         page.add(ft.SafeArea(content=layout, expand=True))
 
+    save_connection_button.on_click = lambda _event=None: page.run_task(
+        save_current_connection,
+    )
     connect_button.on_click = on_connect
     disconnect_button.on_click = on_disconnect
     refresh_button.on_click = lambda: page.run_task(refresh_discovery, session) if session else None

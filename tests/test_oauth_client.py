@@ -94,8 +94,9 @@ class StubClient:
 def sdk(monkeypatch: pytest.MonkeyPatch) -> StubClient:
     client = StubClient()
 
-    def create(url: str) -> StubClient:
+    def create(url: str, *, token_store: object) -> StubClient:
         assert url == "https://example.net/mcp"
+        assert token_store is not None
         return client
 
     monkeypatch.setattr(oauth_client, "create_oauth_client", create)
