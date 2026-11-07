@@ -11,6 +11,7 @@ import pytest
 
 from app import _name
 from rendering import _valid_png, content_views, preview
+from tests.ui_helpers import walk_controls
 from schema_form import (UnionField, create_fields, form_arguments, requires_advanced_json, union_branches, validate_tool_arguments)
 
 
@@ -67,7 +68,7 @@ def test_prompt_messages_and_terminal_streams_are_visible() -> None:
     prompt = content_views({"messages": [
         {"role": "user", "content": {"type": "text", "text": "Show example"}}
     ]})
-    assert any(isinstance(view, ft.TextField) and view.value == "Show example" for view in prompt)
+    assert any(isinstance(view, ft.Markdown) and view.value == "Show example" for view in prompt)
     terminal = content_views({"structuredContent": {
         "stdout": "done", "stderr": "warning", "exit_code": 3,
     }})
@@ -316,3 +317,132 @@ def test_rendered_png_viewport_keeps_full_width_available() -> None:
     viewport = next(item for item in controls if isinstance(item, ft.Container))
     assert viewport.width is None  # Parent stretch determines available viewport width.
     assert isinstance(viewport.content, ft.InteractiveViewer)
+
+
+
+def _readable_controls(payload: dict[str, object]) -> list[ft.Control]:
+    return list(walk_controls(content_views(payload)))
+
+
+def test_deepwiki_answer_is_readable_markdown_not_json() -> None:
+    markdown = "# How React works\n\n- Components\n- Reconciliation"
+    controls = content_views({"content": [{"type": "text", "text": markdown}]})
+    assert isinstance(controls[0], ft.Text)
+    assert controls[0].value == "Answer"
+    assert isinstance(controls[1], ft.Markdown)
+    assert controls[1].value == markdown
+    assert controls[1].selectable
+    assert controls[1].extension_set == ft.MarkdownExtensionSet.GITHUB_FLAVORED
+    assert all(not isinstance(control, ft.TextField) for control in controls[:-1])
+    assert isinstance(controls[-1], ft.ExpansionTile)
+
+
+def test_text_json_is_parsed_into_readable_fields_not_displayed_as_json() -> None:
+    wire: dict[str, object] = {
+        "content": [{"type": "text", "text":
+                     '{"answer":"It works","total":3,"passed":true,'
+                     '"metadata":{"repoName":"facebook/react"},"items":["first","second"]}'}],
+    }
+    controls = _readable_controls(wire)
+    labels = [c.value for c in controls if isinstance(c, ft.Text)]
+    assert {"Answer", "Total", "Passed", "Metadata", "Repo Name", "Items",
+            "3", "Yes"} <= set(labels)
+    assert any(isinstance(c, ft.Text) and c.value == "• first" for c in controls)
+    assert any(isinstance(c, ft.Text) and c.value == "• second" for c in controls)
+    assert any(isinstance(c, ft.Markdown) and c.value == "It works" for c in controls)
+    assert not any(
+        isinstance(c, ft.TextField) and c.value.startswith('{"answer"')
+        for c in controls
+    )
+
+
+def test_structured_content_is_formatted_as_human_fields() -> None:
+    wire: dict[str, object] = {
+        "structuredContent": {
+            "toolStatus": "success", "count": 2,
+            "issues": [{"fileName": "README.md", "lineNumber": 4}],
+            "ready": False, "optional": None,
+        },
+    }
+    controls = _readable_controls(wire)
+    labels = [c.value for c in controls if isinstance(c, ft.Text)]
+    assert {"More information", "Tool Status", "Count", "Issues", "Entry 1", "File Name",
+            "Line Number", "Ready", "No", "Optional", "Not provided"} <= set(labels)
+    raw_fields = [c for c in controls if isinstance(c, ft.TextField)]
+    assert len(raw_fields) == 1  # Only the collapsed advanced JSON viewer.
+    assert raw_fields[0].read_only
+
+
+def test_structured_and_text_duplicate_is_not_shown_twice() -> None:
+    answer = {"answer": "The solution", "sources": ["README.md"]}
+    wire: dict[str, object] = {
+        "content": [{"type": "text", "text": '{"answer":"The solution","sources":["README.md"]}'}],
+        "structuredContent": answer,
+    }
+    controls = _readable_controls(wire)
+    assert sum(
+        isinstance(c, ft.Text) and c.value == "Answer" for c in controls
+    ) == 2  # Heading for content and field named answer.
+    assert not any(isinstance(c, ft.Text) and c.value == "More information" for c in controls)
+
+
+def test_error_result_renders_message_and_details_instead_of_only_flag() -> None:
+    wire: dict[str, object] = {
+        "isError": True,
+        "content": [{"type": "text", "text": "Permission denied: repository is private"}],
+        "structuredContent": {"errorCode": 403, "retryable": False},
+    }
+    controls = _readable_controls(wire)
+    assert any(
+        isinstance(c, ft.Text) and c.color == ft.Colors.ERROR
+        and "error" in str(c.value).lower()
+        for c in controls
+    )
+    assert any(isinstance(c, ft.Markdown) and "Permission denied" in c.value for c in controls)
+    assert any(isinstance(c, ft.Text) and c.value == "Error details" for c in controls)
+    assert any(isinstance(c, ft.Text) and c.value == "Error Code" for c in controls)
+    assert any(isinstance(c, ft.Text) and c.value == "403" for c in controls)
+
+
+def test_resource_and_prompt_messages_are_readable() -> None:
+    resource: dict[str, object] = {
+        "contents": [{"uri": "file:///readme", "mimeType": "text/markdown",
+                      "text": "# Hello\nThis is a document."}],
+    }
+    controls = _readable_controls(resource)
+    assert any(isinstance(c, ft.Markdown) and "# Hello" in c.value for c in controls)
+    assert any(isinstance(c, ft.Text) and "file:///readme" in str(c.value) for c in controls)
+    prompt: dict[str, object] = {
+        "messages": [{"role": "assistant", "content": [
+            {"type": "text", "text": "One."}, {"type": "text", "text": "Two."},
+        ]}],
+    }
+    controls = _readable_controls(prompt)
+    assert any(isinstance(c, ft.Text) and c.value == "Message 1 · Assistant" for c in controls)
+    assert sum(isinstance(c, ft.Markdown) and c.value in ("One.", "Two.") for c in controls) == 2
+
+
+def test_binary_and_oversized_values_do_not_create_huge_text_widgets() -> None:
+    wire: dict[str, object] = {
+        "content": [{"type": "audio", "data": "a" * 60000},
+                    {"type": "image", "mimeType": "image/png", "data": "not a png"},
+                    {"type": "text", "text": "x" * 41000}],
+    }
+    controls = content_views(wire)
+    assert any(isinstance(c, ft.Text) and "binary" in str(c.value) for c in controls)
+    assert any(isinstance(c, ft.Text) and "invalid" in str(c.value) for c in controls)
+    markdown = [c for c in controls if isinstance(c, ft.Markdown)]
+    assert len(markdown) == 1 and len(markdown[0].value) < 41000
+    assert isinstance(controls[-1], ft.ExpansionTile)
+
+
+def test_large_result_has_clear_limit_and_keeps_raw_data_available() -> None:
+    wire: dict[str, object] = {"structuredContent": {"items": list(range(90))}}
+    controls = _readable_controls(wire)
+    assert any(
+        isinstance(c, ft.Text) and "10 more items" in str(c.value) for c in controls
+    )
+    assert any(
+        isinstance(c, ft.TextField) and "89" in c.value
+        for c in controls
+    )

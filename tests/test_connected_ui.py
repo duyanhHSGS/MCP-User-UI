@@ -667,3 +667,58 @@ def test_connection_screen_stretches_panel_across_available_width(width: float) 
     assert page.on_resize is not None
     page.on_resize(None)
     assert connection.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_tool_result_is_a_readable_answer_not_a_json_editor(
+    monkeypatch: pytest.MonkeyPatch, failure: bool,
+) -> None:
+    """Exercise the live UI callback against a fake MCP tool response."""
+    async def call_tool(
+        self: StubMcpSession, name: str, arguments: dict[str, object],
+    ) -> dict[str, object]:
+        self.tool_calls.append((name, arguments))
+        return {
+            "isError": failure,
+            "content": [{"type": "text", "text": (
+                "Access denied: your login has expired" if failure
+                else "# How to use hooks\n\n- Write components\n- Use state"
+            )}],
+            "structuredContent": {"httpStatus": 403 if failure else 200,
+                                  "fileCount": 5},
+        }
+
+    monkeypatch.setattr(StubMcpSession, "call_tool", call_tool)
+
+    async def exercise() -> None:
+        page, session = await _connect()
+        _, detail = _catalog_columns(page)
+        action_row = cast(ft.Row, detail.controls[6])
+        _fire(cast(ft.FilledButton, action_row.controls[0]).on_click)
+        await asyncio.gather(*page.tasks)
+        assert len(session.tool_calls) == 1
+
+        output = cast(ft.Column, detail.controls[7])
+        widgets = list(walk_controls(output))
+        assert any(
+            isinstance(c, ft.Markdown)
+            and ("Access denied" if failure else "# How to use hooks") in c.value
+            for c in widgets
+        )
+        assert any(isinstance(c, ft.Text) and c.value == "Http Status" for c in widgets)
+        assert any(isinstance(c, ft.Text) and c.value == (
+            "Error details" if failure else "Answer"
+        ) for c in widgets)
+        advanced = [c for c in widgets if isinstance(c, ft.ExpansionTile)
+                    and "Raw MCP response" in str(c.title)]
+        assert len(advanced) == 1
+        assert advanced[0].expanded is not True
+        assert all(
+            isinstance(c, ft.TextField) and c.read_only
+            for c in widgets if isinstance(c, ft.TextField)
+        )
+        feedback = cast(ft.Text, action_row.controls[1])
+        assert feedback.value.startswith("Remote tool error" if failure else "Completed")
+
+    asyncio.run(exercise())
