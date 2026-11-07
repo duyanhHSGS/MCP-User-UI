@@ -58,6 +58,76 @@ def test_palette_and_light_mode_update_real_material_3_surfaces(palette: str) ->
     assert page.theme_mode == ft.ThemeMode.LIGHT
 
 
+@pytest.mark.parametrize("width", [None, 0, 320, 360, 440, 599, 600, 859, 860, 1080])
+@pytest.mark.parametrize("screen", [0, 1])
+def test_header_keeps_appearance_at_the_right_of_the_app_name(
+    width: float | None, screen: int,
+) -> None:
+    page = FakePage()
+    page.width = width
+    main(cast(ft.Page, page))
+    select_screen(page, screen)
+
+    header = find_control(page, "app-header")
+    identity = find_control(page, "app-identity")
+    name = find_control(page, "app-name")
+    actions = find_control(page, "appearance-actions")
+    assert isinstance(header, ft.Row)
+    assert isinstance(identity, ft.Row)
+    assert isinstance(name, ft.Text)
+    assert isinstance(actions, ft.Row)
+    assert header.controls[0] is identity
+    assert header.controls[-1] is actions
+    assert not header.wrap
+    assert identity.expand
+    assert identity.controls[-1] is name
+    assert name.value == "MCP User UI"
+    assert name.expand and name.no_wrap and name.max_lines == 1
+    assert name.overflow == ft.TextOverflow.ELLIPSIS
+    assert actions.tight and not actions.expand and not actions.wrap
+    assert actions.alignment == ft.MainAxisAlignment.END
+    dropdown = actions.controls[0]
+    assert isinstance(dropdown, ft.Dropdown)
+    compact = (width or 430) < 600
+    assert dropdown.width == (124 if compact else 138)
+    assert len(identity.controls) == (1 if compact else 2)
+    assert not any(
+        isinstance(control, ft.Text) and control.value == "PLAYGROUND / INSPECTOR"
+        for control in walk_controls(page.controls)
+    )
+
+
+@pytest.mark.parametrize("palette", PALETTES)
+def test_header_theme_controls_work_across_resize_and_screen_changes(palette: str) -> None:
+    page = FakePage()
+    main(cast(ft.Page, page))
+    endpoint = cast(ft.TextField, find_control(page, "endpoint"))
+    endpoint.value = "https://example.net/mcp"
+    select_screen(page, 1)
+
+    for width in (320, 600, 1080, 440):
+        page.width = width
+        assert page.on_resize is not None
+        page.on_resize(None)
+        actions = cast(ft.Row, find_control(page, "appearance-actions"))
+        dropdown = cast(ft.Dropdown, actions.controls[0])
+        dropdown.value = palette
+        assert dropdown.on_select is not None
+        cast(Callable[[], None], dropdown.on_select)()
+        for mode in ("light", "dark"):
+            actions = cast(ft.Row, find_control(page, "appearance-actions"))
+            button = cast(ft.IconButton, actions.controls[1])
+            assert button.on_click is not None
+            cast(Callable[[], None], button.on_click)()
+            assert page.bgcolor == PALETTES[palette][mode].background
+            assert find_control(page, "capabilities-view") is not None
+            header = cast(ft.Row, find_control(page, "app-header"))
+            assert header.controls[-1] is find_control(page, "appearance-actions")
+    select_screen(page, 0)
+    assert find_control(page, "endpoint") is endpoint
+    assert endpoint.value == "https://example.net/mcp"
+
+
 def test_control_walker_visits_nested_controls_without_following_runtime_links() -> None:
     text = ft.Text("Nested")
     field = ft.TextField("Input")

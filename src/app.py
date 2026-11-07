@@ -673,8 +673,10 @@ def main(page: ft.Page) -> None:
         page.theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
         page.dark_theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
 
+        compact_header = (page.width or 430) < 600
         palette_choice = ft.Dropdown(
-            label="Palette", width=138, dense=True, value=theme_name,
+            label="Palette", width=124 if compact_header else 138,
+            dense=True, value=theme_name,
             bgcolor=colors.raised, color=colors.foreground,
             options=[ft.DropdownOption(key=name, text=name) for name in PALETTES],
         )
@@ -691,28 +693,29 @@ def main(page: ft.Page) -> None:
         )
         # Keep the top toolbar in the page body: this Flet desktop build clips
         # Page.appbar when combined with page-level scrolling.
+        # TODO: Recheck title truncation and theme reachability on physical phones.
         page.appbar = None
+        identity_controls: list[ft.Control] = []
+        if not compact_header:
+            identity_controls.append(icon_tile(ft.Icons.HUB, tinted=True, size=25))
+        identity_controls.append(ft.Text(
+            "MCP User UI", key="app-name", expand=True,
+            size=16 if compact_header else 18,
+            weight=ft.FontWeight.W_600, color=colors.foreground,
+            max_lines=1, no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS,
+        ))
         top_bar = panel(
-            ft.ResponsiveRow([
-                ft.Container(
-                    content=ft.Row([
-                        icon_tile(ft.Icons.HUB, tinted=True, size=25),
-                        ft.Column([
-                            text("MCP User UI", 18, bold=True),
-                            text("PLAYGROUND / INSPECTOR", 10, color=colors.secondary),
-                        ], spacing=3),
-                    ], spacing=11),
-                    col={"xs": 12, "md": 7},
+            ft.Row([
+                ft.Row(
+                    identity_controls, key="app-identity", spacing=11, expand=True,
                 ),
-                ft.Container(
-                    content=ft.Row(
-                        [palette_choice, mode_button], spacing=9,
-                        key="appearance-actions",
-                        alignment=ft.MainAxisAlignment.END,
-                    ),
-                    col={"xs": 12, "md": 5},
+                ft.Row(
+                    [palette_choice, mode_button], spacing=9, tight=True,
+                    key="appearance-actions",
+                    alignment=ft.MainAxisAlignment.END,
                 ),
-            ], spacing=10, run_spacing=8),
+            ], key="app-header", spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER),
             padding=13, radius=16,
         )
 
