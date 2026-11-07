@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 
+from typography import DEFAULT_TEXT_SCALE, valid_text_scale
 from ui_theme import DEFAULT_BRIGHTNESS, DEFAULT_PALETTE, PALETTES
 
 
@@ -61,4 +62,27 @@ class AppPreferences:
             raise ValueError("Nerd mode must be on or off")
         settings = self._read_settings()
         settings["nerd_mode"] = enabled
+        self._write_settings(settings)
+
+
+    def load_text_scales(self) -> tuple[int, int]:
+        """Missing, corrupt and out-of-range settings are safe default sizes."""
+        settings = self._read_settings()
+        interface = settings.get("interface_text_scale")
+        answer = settings.get("answer_text_scale")
+        return (
+            interface if isinstance(interface, int) and valid_text_scale(interface)
+            else DEFAULT_TEXT_SCALE,
+            answer if isinstance(answer, int) and valid_text_scale(answer)
+            else DEFAULT_TEXT_SCALE,
+        )
+
+    def save_text_scales(self, interface: int, answer: int) -> None:
+        if not valid_text_scale(interface) or not valid_text_scale(answer):
+            raise ValueError("Text scale must be 100–180% in steps of 10%.")
+        settings = self._read_settings()
+        settings.update({
+            "interface_text_scale": interface,
+            "answer_text_scale": answer,
+        })
         self._write_settings(settings)

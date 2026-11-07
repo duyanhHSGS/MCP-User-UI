@@ -8,6 +8,7 @@ import time
 import flet as ft
 
 from app_preferences import AppPreferences
+from typography import DEFAULT_TEXT_SCALE, TypographyScaler, readable_markdown_style, typography_theme
 from iconography import CATEGORY_ICONS, NAVIGATION_ICONS, argument_icon
 from rendering import content_views, preview
 from schema_form import (
@@ -47,8 +48,12 @@ def main(page: ft.Page) -> None:
     preferences = AppPreferences.from_flet_environment()
     theme_name, brightness = preferences.load()
     nerd_mode = preferences.load_nerd_mode()
+    ui_percent, answer_percent = preferences.load_text_scales()
+    scaler = TypographyScaler()
+    scaler.update(ui_percent, answer_percent)
     show_raw_json = False  # Independently opt-in each time the app starts.
     colors: Palette = PALETTES[theme_name][brightness]
+    scaler.set_palette(colors, dark_mode=brightness == "dark")
     input_borders: dict[ft.ControlState, ft.InputBorder] = {}
 
     def text(value: str, size: int = 13, *, bold: bool = False,
@@ -155,6 +160,20 @@ def main(page: ft.Page) -> None:
     settings_warning = ft.Text(
         "", color=colors.danger, selectable=True, visible=False,
     )
+    ui_scale_slider = ft.Slider(
+        key="interface-text-scale", min=100, max=180, divisions=8,
+        value=ui_percent, label="{value}%",
+        expand=True,
+    )
+    answer_scale_slider = ft.Slider(
+        key="answer-text-scale", min=100, max=180, divisions=8,
+        value=answer_percent, label="{value}%",
+        expand=True,
+    )
+    ui_scale_label = ft.Text(f"{ui_percent}%", key="interface-text-scale-label", selectable=True)
+    answer_scale_label = ft.Text(
+        f"{answer_percent}%", key="answer-text-scale-label", selectable=True,
+    )
 
     session: McpSession | None = None
     pending_session: McpSession | None = None
@@ -245,6 +264,7 @@ def main(page: ft.Page) -> None:
         )
         result_technical_controls.append(copy_button)
         target.controls.append(copy_button)
+        scaler.apply(target)
         update_technical_visibility()
 
     def result_target_is_current(target: ft.Column) -> bool:
@@ -480,6 +500,7 @@ def main(page: ft.Page) -> None:
             detail_column.controls.extend(prompt_editor(item))
         elif category == "Resources":
             detail_column.controls.extend(resource_editor(item))
+        scaler.apply(detail_column)
 
     def draw_catalog() -> None:
         nonlocal selected_name, current_tool_editor
@@ -491,6 +512,7 @@ def main(page: ft.Page) -> None:
         if session is None:
             heading.value = "Connect to browse MCP capabilities."
             navigation.controls.clear()
+            scaler.apply(list_column, detail_column, navigation)
             page.update()
             return
         draw_navigation()
@@ -522,6 +544,7 @@ def main(page: ft.Page) -> None:
             clear_button = ft.OutlinedButton("Clear log", icon=ft.Icons.DELETE_SWEEP_OUTLINED)
             clear_button.on_click = clear_log
             list_column.controls.append(clear_button)
+            scaler.apply(list_column, detail_column, navigation)
             page.update()
             return
         heading.value = f"{category} · {len(catalog[category])} discovered"
@@ -538,6 +561,7 @@ def main(page: ft.Page) -> None:
                 text("Nothing found", 17, bold=True),
                 text("Refresh discovery or try another search.", 12, muted=True),
             ])
+            scaler.apply(list_column, detail_column, navigation)
             page.update()
             return
         if not any(name == selected_name for _, name in matches):
@@ -574,6 +598,7 @@ def main(page: ft.Page) -> None:
             if item_name == selected_name:
                 draw_detail(item)
                 break
+        scaler.apply(list_column, detail_column, navigation)
         page.update()
 
     async def discover(
@@ -706,6 +731,53 @@ def main(page: ft.Page) -> None:
         settings_warning.visible = bool(message)
         settings_warning.color = colors.danger
 
+    def update_text_scale() -> None:
+        """Resize live text in place; preserve inputs, results and scroll positions."""
+        nonlocal ui_percent, answer_percent
+        ui_percent = max(100, min(180, round((ui_scale_slider.value or 100) / 10) * 10))
+        answer_percent = max(100, min(180, round((answer_scale_slider.value or 100) / 10) * 10))
+        scaler.update(ui_percent, answer_percent)
+        ui_scale_label.value = f"{ui_percent}%"
+        answer_scale_label.value = f"{answer_percent}%"
+        page.theme = ft.Theme(
+            use_material3=True, color_scheme_seed=colors.accent,
+            text_theme=typography_theme(ui_percent),
+            markdown_theme=readable_markdown_style(colors, answer_percent),
+        )
+        page.dark_theme = ft.Theme(
+            use_material3=True, color_scheme_seed=colors.accent,
+            text_theme=typography_theme(ui_percent),
+            markdown_theme=readable_markdown_style(colors, answer_percent),
+        )
+        if desktop_rail is not None:
+            desktop_rail.width = round(102 * ui_percent / 100)
+            desktop_rail.min_width = round(90 * ui_percent / 100)
+        if page.navigation_bar is not None:
+            page.navigation_bar.height = round(80 * ui_percent / 100)
+        size_workspace()
+        scaler.apply(page.controls, page.navigation_bar)
+        page.update()
+
+    def persist_text_scale() -> None:
+        try:
+            preferences.save_text_scales(ui_percent, answer_percent)
+        except OSError:
+            show_settings_warning("Couldn't save text size preferences on this device.")
+        else:
+            show_settings_warning("")
+        page.update()
+
+    def reset_text_scale() -> None:
+        ui_scale_slider.value = DEFAULT_TEXT_SCALE
+        answer_scale_slider.value = DEFAULT_TEXT_SCALE
+        update_text_scale()
+        persist_text_scale()
+
+    ui_scale_slider.on_change = update_text_scale
+    ui_scale_slider.on_change_end = persist_text_scale
+    answer_scale_slider.on_change = update_text_scale
+    answer_scale_slider.on_change_end = persist_text_scale
+
     def set_nerd_mode(value: bool) -> None:
         """Update mounted settings and capability controls; never rebuild them."""
         nonlocal nerd_mode, show_raw_json
@@ -804,6 +876,14 @@ def main(page: ft.Page) -> None:
         for screen in (connection_view, capabilities_view, settings_view):
             recolor(screen)
 
+        # Markdown is not a regular Text widget: its stylesheet must be
+        # explicitly rebuilt for each palette and mode, even at 100% zoom.
+        scaler.set_palette(colors, dark_mode=brightness == "dark")
+        scaler.apply(
+            page.controls, page.navigation_bar,
+            connection_view, capabilities_view, settings_view,
+        )
+
         for mode, button in appearance_buttons.items():
             active = mode == brightness
             button.content = ("Light" if mode == "light" else "Dark") + (
@@ -833,8 +913,16 @@ def main(page: ft.Page) -> None:
         page.theme_mode = (
             ft.ThemeMode.DARK if brightness == "dark" else ft.ThemeMode.LIGHT
         )
-        page.theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
-        page.dark_theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
+        page.theme = ft.Theme(
+            use_material3=True, color_scheme_seed=colors.accent,
+            text_theme=typography_theme(ui_percent),
+            markdown_theme=readable_markdown_style(colors, answer_percent),
+        )
+        page.dark_theme = ft.Theme(
+            use_material3=True, color_scheme_seed=colors.accent,
+            text_theme=typography_theme(ui_percent),
+            markdown_theme=readable_markdown_style(colors, answer_percent),
+        )
         show_settings_warning("")
         page.update()
 
@@ -865,6 +953,7 @@ def main(page: ft.Page) -> None:
             return
         selected_tab = index
         screen_host.content = screens[index]
+        scaler.apply(screen_host)
         if desktop_rail is not None:
             desktop_rail.selected_index = index
         if page.navigation_bar is not None:
@@ -881,7 +970,8 @@ def main(page: ft.Page) -> None:
         # The navigation rail takes 102px and the body has 44px of padding.
         # A >=920px window leaves enough room for ResponsiveRow's 768px
         # two-column breakpoint. Below that, let the panels stack and page-scroll.
-        side_by_side = (page.width or 430) >= 920
+        rail_extra = max(0, round(102 * ui_percent / 100) - 102)
+        side_by_side = (page.width or 430) >= 920 + rail_extra
         pane_height = max(220, (page.height or 690) - 330) if side_by_side else None
         if library_surface is not None:
             library_surface.height = pane_height
@@ -924,8 +1014,16 @@ def main(page: ft.Page) -> None:
         page.theme_mode = (
             ft.ThemeMode.DARK if brightness == "dark" else ft.ThemeMode.LIGHT
         )
-        page.theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
-        page.dark_theme = ft.Theme(use_material3=True, color_scheme_seed=colors.accent)
+        page.theme = ft.Theme(
+            use_material3=True, color_scheme_seed=colors.accent,
+            text_theme=typography_theme(ui_percent),
+            markdown_theme=readable_markdown_style(colors, answer_percent),
+        )
+        page.dark_theme = ft.Theme(
+            use_material3=True, color_scheme_seed=colors.accent,
+            text_theme=typography_theme(ui_percent),
+            markdown_theme=readable_markdown_style(colors, answer_percent),
+        )
 
         compact_header = (page.width or 430) < 600
         # Unlike the original two-screen layout, appearance lives on Settings
@@ -1015,6 +1113,39 @@ def main(page: ft.Page) -> None:
                     12, muted=True,
                 ),
             ], spacing=12, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                padding=18),
+            panel(ft.Column([
+                ft.Row([
+                    icon_tile(ft.Icons.TEXT_FIELDS_OUTLINED, size=19),
+                    text("Text & readability", 16, bold=True),
+                ], spacing=10),
+                text("Interface text size", 13, bold=True),
+                ft.Row([ui_scale_slider, ui_scale_label], spacing=8),
+                text("Enlarge menus, tool names, forms, labels, and navigation.",
+                     12, muted=True),
+                ft.Divider(height=1, color=colors.outline),
+                text("Answer text size", 13, bold=True),
+                ft.Row([answer_scale_slider, answer_scale_label], spacing=8),
+                text("Make Markdown answers, headings, lists, and code easier to read.",
+                     12, muted=True),
+                ft.Container(
+                    content=ft.Column([
+                        text("Live preview · readable at a glance", 14, bold=True),
+                        ft.Text("The quick brown fox jumps over the lazy dog.",
+                                key="text-scale-preview", selectable=True),
+                        ft.Markdown(
+                            "## Answer preview\n\n- Clear, readable MCP responses",
+                            key="answer-scale-preview", selectable=True,
+                        ),
+                    ], spacing=7),
+                    padding=12, border_radius=12, bgcolor=colors.raised,
+                ),
+                ft.OutlinedButton(
+                    "Reset text sizes", key="reset-text-scales",
+                    icon=ft.Icons.SETTINGS_BACKUP_RESTORE_OUTLINED,
+                    on_click=lambda _event=None: reset_text_scale(),
+                ),
+            ], spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                 padding=18),
             panel(ft.Column([
                 ft.Row([
@@ -1178,10 +1309,13 @@ def main(page: ft.Page) -> None:
             destinations=[ft.NavigationBarDestination(label=label, icon=icon, selected_icon=selected)
                           for label, icon, selected in destinations],
             on_change=lambda event: select_screen(event.control.selected_index or 0),
-            bgcolor=colors.surface, indicator_color=colors.accent_soft, visible=not wide,
+            bgcolor=colors.surface, indicator_color=colors.accent_soft,
+            height=round(80 * ui_percent / 100), visible=not wide,
         )
         desktop_rail = ft.NavigationRail(
-            key="screen-navigation-wide", width=102, min_width=90,
+            key="screen-navigation-wide",
+            width=round(102 * ui_percent / 100),
+            min_width=round(90 * ui_percent / 100),
             height=page.height or 690, selected_index=selected_tab,
             destinations=[ft.NavigationRailDestination(label=label, icon=icon, selected_icon=selected)
                           for label, icon, selected in destinations],
@@ -1194,6 +1328,7 @@ def main(page: ft.Page) -> None:
             [desktop_rail, body], spacing=0, expand=True,
             vertical_alignment=ft.CrossAxisAlignment.START,
         )
+        scaler.apply(layout, page.navigation_bar)
         page.add(ft.SafeArea(content=layout, expand=True))
 
     connect_button.on_click = on_connect

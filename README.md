@@ -37,3 +37,15 @@ flet build ipa
 flet build ios-simulator
 flet build web
 ```
+
+
+## Text size and readability
+
+Open **Settings → Text & readability** to adjust two independent sliders:
+
+- **Interface text size** (100–180%): menus, buttons, forms, labels, and navigation.
+- **Answer text size** (100–180%): Markdown answers, lists, headings, and code.
+
+Changes preview immediately, save when you release the slider, and persist locally.
+**Reset text sizes** returns both sliders to 100%. The UI scales fonts rather than
+stretching the whole window; the desktop navigation rail remains pinned.

@@ -1091,3 +1091,111 @@ def test_pinned_list_and_result_have_independent_scroll_after_tool_execution(
         assert details.scroll == ft.ScrollMode.AUTO
 
     asyncio.run(exercise())
+
+
+
+def test_scaled_text_applies_to_newly_returned_mcp_content() -> None:
+    """A tool response created after the slider moves must use the current sizes."""
+    async def exercise() -> None:
+        page, session = await _connect()
+        select_screen(page, 2)
+        interface = cast(ft.Slider, find_control(page, "interface-text-scale"))
+        answer = cast(ft.Slider, find_control(page, "answer-text-scale"))
+        interface.value = 150
+        answer.value = 180
+        _fire(interface.on_change)
+        _fire(answer.on_change)
+        select_screen(page, 1)
+        _, detail = _catalog_columns(page)
+        action = next(
+            control for control in detail.controls
+            if isinstance(control, ft.Row)
+            and any(isinstance(child, ft.FilledButton) for child in control.controls)
+        )
+        assert isinstance(action, ft.Row)
+        run = next(child for child in action.controls if isinstance(child, ft.FilledButton))
+        _fire(run.on_click)
+        await asyncio.gather(*page.tasks)
+        assert len(session.tool_calls) == 1
+        output = next(
+            control for control in detail.controls if isinstance(control, ft.Column)
+            and any(isinstance(child, ft.ExpansionTile) for child in control.controls)
+        )
+        markdowns = [item for item in walk_controls(output) if isinstance(item, ft.Markdown)]
+        assert markdowns
+        assert all(
+            md.md_style_sheet is not None
+            and md.md_style_sheet.p_text_style is not None
+            and md.md_style_sheet.p_text_style.size == 27
+            for md in markdowns
+        )
+        headings = [
+            item for item in walk_controls(output)
+            if isinstance(item, ft.Text) and item.value == "Answer"
+        ]
+        assert headings and headings[0].size == 21
+        assert cast(ft.Text, find_control(page, "capability-heading")).size == 25.5
+
+    asyncio.run(exercise())
+
+
+
+@pytest.mark.parametrize(("palette", "mode"), [
+    ("Lagoon", "light"),
+    ("Ember", "dark"),
+    ("Graphite", "light"),
+    ("Aurora", "dark"),
+])
+def test_existing_tool_answer_recolors_when_palette_changes(
+    palette: str, mode: str,
+) -> None:
+    """A returned MCP Markdown answer must remain mounted and legible after theming."""
+    async def exercise() -> None:
+        page, session = await _connect()
+        _, detail = _catalog_columns(page)
+        run_row = cast(ft.Row, detail.controls[6])
+        run = cast(ft.FilledButton, run_row.controls[0])
+        _fire(run.on_click)
+        await asyncio.gather(*page.tasks)
+        assert len(session.tool_calls) == 1
+
+        output = cast(ft.Column, detail.controls[7])
+        answers = [
+            widget for widget in walk_controls(output)
+            if isinstance(widget, ft.Markdown)
+        ]
+        assert len(answers) == 1
+        answer = answers[0]
+        assert answer.value == "hello from mock"
+        assert answer.md_style_sheet is not None
+        assert answer.md_style_sheet.p_text_style is not None
+        assert answer.md_style_sheet.p_text_style.color == PALETTES["Lagoon"]["dark"].foreground
+        result_items = list(output.controls)
+        root = page.controls[0]
+
+        select_screen(page, 2)
+        option = cast(ft.ListTile, find_control(page, f"palette-{palette.lower()}"))
+        _fire(option.on_click, None)
+        display = cast(ft.FilledTonalButton, find_control(page, f"mode-{mode}"))
+        _fire(display.on_click, None)
+        slider = cast(ft.Slider, find_control(page, "answer-text-scale"))
+        slider.value = 160
+        _fire(slider.on_change)
+        select_screen(page, 1)
+
+        selected = PALETTES[palette][mode]
+        assert page.controls[0] is root
+        assert output.controls == result_items
+        assert answer in list(walk_controls(output))
+        assert answer.value == "hello from mock"
+        assert answer.md_style_sheet is not None
+        assert answer.md_style_sheet.p_text_style is not None
+        assert answer.md_style_sheet.p_text_style.color == selected.foreground
+        assert answer.md_style_sheet.p_text_style.size == 24
+        assert answer.code_theme == (
+            ft.MarkdownCodeTheme.A11Y_DARK if mode == "dark"
+            else ft.MarkdownCodeTheme.A11Y_LIGHT
+        )
+        assert len(session.tool_calls) == 1  # Theme change never recalls the server.
+
+    asyncio.run(exercise())
