@@ -99,6 +99,7 @@ def content_views(payload: dict[str, object]) -> list[ft.Control]:
         views.append(ft.Text("No readable content; see raw response."))
     views.append(ft.ExpansionTile(
         title="Raw MCP response (JSON)",
+        expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
         controls=[ft.TextField(value=preview(payload), multiline=True, read_only=True, min_lines=3, max_lines=14)],
     ))
     return views

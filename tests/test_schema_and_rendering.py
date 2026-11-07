@@ -272,3 +272,47 @@ def test_multiple_union_selectors_control_only_their_own_field() -> None:
     cast(Callable[[], None], second.selector.on_select)()
     assert first.inputs[1].visible and not first.inputs[0].visible
     assert second.inputs[1].visible and not second.inputs[0].visible
+
+
+
+@pytest.mark.parametrize("payload", [
+    {"structuredContent": {"status": "ok", "items": [1, 2]},
+     "content": [{"type": "text", "text": "result"}]},
+    {"structuredContent": {"stdout": "out", "stderr": "err", "exit_code": 1},
+     "content": [{"type": "text", "text": "details"}], "isError": True},
+    {"messages": [{"role": "assistant", "content": {"text": "answer"}}]},
+    {"content": [{"type": "resource", "resource": {"uri": "a", "text": "hello"}}]},
+    {"content": [{"type": "text", "text": "long " * 1000}]},
+    {},
+])
+def test_every_result_section_expands_across_available_width(payload: dict[str, object]) -> None:
+    """The host column stretches fields; expanded raw response must stretch its children."""
+    host = ft.Column(
+        content_views(payload),
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
+    assert host.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+    assert any(isinstance(item, ft.ExpansionTile) for item in host.controls)
+    for item in host.controls:
+        if isinstance(item, ft.ExpansionTile):
+            assert item.expanded_cross_axis_alignment == ft.CrossAxisAlignment.STRETCH
+            assert item.controls
+            for child in item.controls:
+                assert isinstance(child, ft.TextField)
+                assert child.width is None  # Stretches with the viewport, not a fixed width.
+        if isinstance(item, ft.TextField):
+            assert item.width is None
+
+
+def test_rendered_png_viewport_keeps_full_width_available() -> None:
+    image = Image.new("RGB", (4, 4), "red")
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    payload: dict[str, object] = {
+        "content": [{"type": "image", "mimeType": "image/png",
+                     "data": base64.b64encode(stream.getvalue()).decode("ascii")}],
+    }
+    controls = content_views(payload)
+    viewport = next(item for item in controls if isinstance(item, ft.Container))
+    assert viewport.width is None  # Parent stretch determines available viewport width.
+    assert isinstance(viewport.content, ft.InteractiveViewer)

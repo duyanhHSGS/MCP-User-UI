@@ -611,3 +611,59 @@ def test_complex_required_union_still_shows_advanced_json(catalog: Catalog) -> N
         assert session.tool_calls == [("complex_union", {"value": "ok"})]
 
     asyncio.run(exercise())
+
+
+
+@pytest.mark.parametrize("width", [320, 440, 859, 860, 1080])
+def test_full_width_result_and_error_layouts_at_all_breakpoints(
+    catalog: Catalog, width: float,
+) -> None:
+    """Tool/prompt/resource/log views never constrain results to intrinsic text width."""
+    async def exercise() -> None:
+        page, session = await _connect()
+        page.width = width
+        assert page.on_resize is not None
+        page.on_resize(None)
+
+        for index in range(3):
+            navigation = cast(ft.Row, find_control(page, "capability-categories"))
+            _fire(cast(ft.OutlinedButton, navigation.controls[index]).on_click)
+            _, detail = _catalog_columns(page)
+            outputs = [widget for widget in detail.controls
+                       if isinstance(widget, ft.Column)
+                       and widget.horizontal_alignment == ft.CrossAxisAlignment.STRETCH]
+            assert outputs, f"Missing full-width output in section {index}"
+            for output in outputs:
+                assert output.width is None
+            feedback_rows = [widget for widget in detail.controls
+                             if isinstance(widget, ft.Row)
+                             and any(isinstance(child, ft.FilledButton)
+                                     for child in widget.controls)]
+            assert feedback_rows
+            for row in feedback_rows:
+                assert not row.wrap
+                messages = [item for item in row.controls if isinstance(item, ft.Text)]
+                assert messages and all(message.expand for message in messages)
+        navigation = cast(ft.Row, find_control(page, "capability-categories"))
+        _fire(cast(ft.OutlinedButton, navigation.controls[-1]).on_click)
+        _, detail = _catalog_columns(page)
+        logs = [widget for widget in detail.controls
+                if isinstance(widget, ft.TextField) and widget.label == "JSON-RPC log"]
+        assert len(logs) == 1 and logs[0].width is None
+        assert session.tool_calls == []
+
+    asyncio.run(exercise())
+
+
+
+@pytest.mark.parametrize("width", [320, 440, 860, 1080])
+def test_connection_screen_stretches_panel_across_available_width(width: float) -> None:
+    page = FakePage()
+    page.width = width
+    app_module.main(cast(ft.Page, page))
+    connection = cast(ft.Column, find_control(page, "connection-view"))
+    assert connection.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+    assert connection.width is None
+    assert page.on_resize is not None
+    page.on_resize(None)
+    assert connection.horizontal_alignment == ft.CrossAxisAlignment.STRETCH

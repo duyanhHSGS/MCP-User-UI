@@ -120,7 +120,10 @@ def main(page: ft.Page) -> None:
     workspace = ft.ResponsiveRow(visible=False)
     summary_row = ft.Row(key="capability-summary", spacing=12, wrap=True, visible=False)
     empty_state = ft.Container(visible=True)
-    connection_view = ft.Column(key="connection-view", spacing=15)
+    connection_view = ft.Column(
+        key="connection-view", spacing=15,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
     # TODO: Recheck full-width search/discovery with large text on physical phones.
     capabilities_view = ft.Column(
         key="capabilities-view", spacing=15,
@@ -266,8 +269,8 @@ def main(page: ft.Page) -> None:
             fields, spacing=12, visible=not must_use_json,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-        feedback = ft.Text("No call yet.", selectable=True, color=ft.Colors.OUTLINE)
-        output = ft.Column(spacing=10)
+        feedback = ft.Text("No call yet.", selectable=True, color=ft.Colors.OUTLINE, expand=True)
+        output = ft.Column(spacing=10, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         run_button = ft.FilledButton("Run tool", icon=ft.Icons.PLAY_ARROW)
 
         def toggle_mode() -> None:
@@ -304,15 +307,17 @@ def main(page: ft.Page) -> None:
         advanced.on_change = toggle_mode
         run_button.on_click = call_tool
         views: list[ft.Control] = [advanced, form_panel, raw_input,
-                                   ft.Row([run_button, feedback], wrap=True), output]
+                                   ft.Row([run_button, feedback]), output]
         views.append(ft.ExpansionTile(
             title="Input schema",
+            expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
             controls=[ft.TextField(value=preview(schema), read_only=True, multiline=True,
                                    min_lines=3, max_lines=12)],
         ))
         if isinstance(item.get("outputSchema"), dict):
             views.append(ft.ExpansionTile(
                 title="Output schema",
+                expanded_cross_axis_alignment=ft.CrossAxisAlignment.STRETCH,
                 controls=[ft.TextField(value=preview(item["outputSchema"]), read_only=True,
                                        multiline=True, min_lines=3, max_lines=12)],
             ))
@@ -333,8 +338,8 @@ def main(page: ft.Page) -> None:
                 tint_field(field)
                 fields.append(field)
                 arg_fields[name] = (field, required)
-        feedback = ft.Text("No prompt retrieved.", color=ft.Colors.OUTLINE)
-        output = ft.Column(spacing=8)
+        feedback = ft.Text("No prompt retrieved.", color=ft.Colors.OUTLINE, expand=True)
+        output = ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         button = ft.FilledButton("Get prompt")
 
         def run_prompt() -> None:
@@ -355,15 +360,15 @@ def main(page: ft.Page) -> None:
                            "arguments": arguments}, feedback, output, button)
 
         button.on_click = run_prompt
-        return [*fields, ft.Row([button, feedback], wrap=True), output]
+        return [*fields, ft.Row([button, feedback]), output]
 
     def resource_editor(item: dict[str, object]) -> list[ft.Control]:
         uri = item.get("uri") or item.get("uriTemplate") or ""
         uri_field = ft.TextField(label="Resource URI (expand template placeholders manually)",
                                  value=str(uri))
         tint_field(uri_field)
-        feedback = ft.Text("No resource retrieved.", color=colors.muted)
-        output = ft.Column(spacing=8)
+        feedback = ft.Text("No resource retrieved.", color=colors.muted, expand=True)
+        output = ft.Column(spacing=8, horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
         button = ft.FilledButton("Read resource")
 
         def read_resource() -> None:
@@ -380,7 +385,7 @@ def main(page: ft.Page) -> None:
                           feedback, output, button)
 
         button.on_click = read_resource
-        return [uri_field, ft.Row([button, feedback], wrap=True), output]
+        return [uri_field, ft.Row([button, feedback]), output]
 
     def draw_detail(item: dict[str, object]) -> None:
         detail_column.controls.clear()
