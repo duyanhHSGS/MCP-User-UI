@@ -570,3 +570,95 @@ def test_deletion_reports_directory_error_and_preserves_profile_index(
         store.delete(profile)
     assert store.list() == [profile]
     assert directory.exists()
+
+
+
+@pytest.mark.parametrize("width", [320, 430, 860, 1080, 1600])
+@pytest.mark.parametrize("url_length", [24, 160])
+def test_saved_card_uses_safe_nonwrapping_layout_at_every_width(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    width: int, url_length: int,
+) -> None:
+    """Regression: Expanded cannot be placed inside a wrapping Flet Row."""
+    monkeypatch.setenv("FLET_APP_STORAGE_DATA", str(tmp_path / "data"))
+    url = "https://example.net/" + "a" * url_length
+    store = _storage(tmp_path)
+    profile = store.save(url, oauth=False, bearer="secret")
+    page = FakePage()
+    page.width = width
+    app_module.main(cast(ft.Page, page))
+    saved = cast(ft.Column, find_control(page, "saved-connections"))
+    assert len(saved.controls) == 1
+
+    card = cast(ft.Container, saved.controls[0])
+    body = cast(ft.Column, card.content)
+    assert isinstance(body, ft.Column)
+    assert not body.wrap
+    assert body.expand is not True
+    assert body.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+    assert len(body.controls) == 3
+    url_label = cast(ft.Text, body.controls[0])
+    assert url_label.value == url
+    assert url_label.tooltip == url
+    assert url_label.max_lines == 2
+    assert url_label.overflow == ft.TextOverflow.ELLIPSIS
+    assert cast(ft.Text, body.controls[1]).value == "Bearer token"
+
+    actions = cast(ft.Row, body.controls[2])
+    assert not actions.wrap
+    assert all(control.expand is not True for control in actions.controls)
+    assert find_control(page, f"saved-use-{profile.identifier}") is actions.controls[0]
+    assert find_control(page, f"saved-remove-{profile.identifier}") is actions.controls[1]
+    assert not cast(ft.OutlinedButton, actions.controls[0]).disabled
+
+
+def test_connect_button_looks_disabled_when_connected_and_after_theme_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from ui_theme import PALETTES
+    from tests.ui_helpers import select_screen
+
+    async def exercise() -> None:
+        monkeypatch.setenv("FLET_APP_STORAGE_DATA", str(tmp_path / "data"))
+        monkeypatch.setattr(app_module, "McpSession", StubMcpSession)
+        page = FakePage()
+        app_module.main(cast(ft.Page, page))
+        actions = cast(ft.Row, find_control(page, "connection-actions"))
+        connect = cast(ft.FilledTonalButton, actions.controls[0])
+        save = cast(ft.FilledTonalButton, find_control(page, "save-connection"))
+        palette = PALETTES["Lagoon"]["dark"]
+        assert not connect.disabled
+        assert connect.bgcolor == palette.accent
+        assert connect.color == palette.background
+        assert save.disabled and save.bgcolor == palette.raised
+
+        endpoint = cast(ft.TextField, find_control(page, "endpoint"))
+        endpoint.value = "https://test.example/mcp"
+        assert connect.on_click is not None
+        cast(Callable[[], None], connect.on_click)()
+        await asyncio.gather(*page.tasks)
+        assert connect.disabled
+        assert connect.bgcolor == palette.raised
+        assert connect.color == palette.muted
+        assert connect.icon_color == palette.muted
+        assert not save.disabled and save.bgcolor == palette.accent
+
+        select_screen(page, 2)
+        graphite = cast(ft.ListTile, find_control(page, "palette-graphite"))
+        assert graphite.on_click is not None
+        cast(Callable[[object], None], graphite.on_click)(None)
+        bright = PALETTES["Graphite"]["dark"]
+        assert connect.disabled and connect.bgcolor == bright.raised
+        assert connect.color == bright.muted
+        assert save.bgcolor == bright.accent
+        select_screen(page, 0)
+        disconnect = cast(ft.OutlinedButton, actions.controls[1])
+        assert disconnect.on_click is not None
+        cast(Callable[[], None], disconnect.on_click)()
+        await asyncio.gather(*page.tasks)
+        assert not connect.disabled
+        assert connect.bgcolor == bright.accent
+        assert connect.color == bright.background
+        assert save.disabled and save.bgcolor == bright.raised
+
+    asyncio.run(exercise())

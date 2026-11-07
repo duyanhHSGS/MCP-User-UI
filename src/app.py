@@ -225,22 +225,30 @@ def main(page: ft.Page) -> None:
             saved_use_buttons.append(use_button)
             saved_list.controls.append(
                 ft.Container(
-                    content=ft.Row([
-                        ft.Column([
-                            text(profile.url, 13, bold=True),
-                            text(profile.auth_label, 11, muted=True),
-                        ], spacing=3, expand=True),
-                        use_button,
-                        ft.IconButton(
-                            icon=ft.Icons.CLOSE_OUTLINED,
-                            key=f"saved-remove-{profile.identifier}",
-                            icon_color=colors.danger,
-                            tooltip="Delete saved endpoint and credentials",
-                            on_click=lambda _event=None, p=profile: page.run_task(
-                                remove_saved_connection, p,
-                            ),
+                    # Separate URL and actions: Expanded inside a wrapping Row
+                    # causes a Flutter ParentDataWidget error (gray card).
+                    content=ft.Column([
+                        ft.Text(
+                            profile.url, size=13, selectable=True,
+                            color=colors.foreground, weight=ft.FontWeight.W_600,
+                            max_lines=2, overflow=ft.TextOverflow.ELLIPSIS,
+                            tooltip=profile.url,
                         ),
-                    ], spacing=8, wrap=True),
+                        text(profile.auth_label, 11, muted=True),
+                        ft.Row([
+                            use_button,
+                            ft.IconButton(
+                                icon=ft.Icons.CLOSE_OUTLINED,
+                                key=f"saved-remove-{profile.identifier}",
+                                icon_color=colors.danger,
+                                tooltip="Delete saved endpoint and credentials",
+                                on_click=lambda _event=None, p=profile: page.run_task(
+                                    remove_saved_connection, p,
+                                ),
+                            ),
+                        ], spacing=8),
+                    ], spacing=8,
+                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                     padding=12, border_radius=12,
                     bgcolor=colors.raised, border=ft.Border.all(1, colors.outline),
                 ),
@@ -253,6 +261,11 @@ def main(page: ft.Page) -> None:
         token.disabled = connected or loading or bool(browser_oauth.value)
         browser_oauth.disabled = connected or loading
         connect_button.disabled = connected or loading
+        connect_button.bgcolor = colors.raised if connect_button.disabled else colors.accent
+        connect_button.color = colors.muted if connect_button.disabled else colors.background
+        connect_button.icon_color = (
+            colors.muted if connect_button.disabled else colors.background
+        )
         disconnect_button.disabled = not connected and not loading
         refresh_button.disabled = not connected or loading or running
         save_connection_button.disabled = not connected or loading or saving_connection
@@ -1057,6 +1070,21 @@ def main(page: ft.Page) -> None:
                     else ft.Icons.RADIO_BUTTON_UNCHECKED
                 )
                 tile.trailing.color = colors.accent if active else colors.muted
+
+        # Respect disabled state when the palette changes, too.
+        connect_button.bgcolor = (
+            colors.raised if connect_button.disabled else colors.accent
+        )
+        connect_button.color = (
+            colors.muted if connect_button.disabled else colors.background
+        )
+        connect_button.icon_color = connect_button.color
+        save_connection_button.bgcolor = (
+            colors.raised if save_connection_button.disabled else colors.accent
+        )
+        save_connection_button.color = (
+            colors.muted if save_connection_button.disabled else colors.background
+        )
 
         page.bgcolor = colors.background
         page.theme_mode = (
