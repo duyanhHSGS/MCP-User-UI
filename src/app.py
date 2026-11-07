@@ -81,6 +81,9 @@ def main(page: ft.Page) -> None:
             field.bgcolor = colors.raised
             field.border = input_borders
             field.color = colors.foreground
+        elif isinstance(field, ft.Column):
+            for child in field.controls:
+                tint_field(child)
 
     endpoint = ft.TextField(
         key="endpoint",
@@ -103,7 +106,8 @@ def main(page: ft.Page) -> None:
     )
     filter_box = ft.TextField(
         key="capability-search",
-        label="Search tools, prompts and resources", hint_text="Search by name or description",
+        label="Search capabilities", hint_text="Search by name or description",
+        prefix_icon=ft.Icons.SEARCH,
         disabled=True, dense=True,
     )
     navigation = ft.Row(key="capability-categories", spacing=8, wrap=True)
@@ -117,7 +121,11 @@ def main(page: ft.Page) -> None:
     summary_row = ft.Row(key="capability-summary", spacing=12, wrap=True, visible=False)
     empty_state = ft.Container(visible=True)
     connection_view = ft.Column(key="connection-view", spacing=15)
-    capabilities_view = ft.Column(key="capabilities-view", spacing=15)
+    # TODO: Recheck full-width search/discovery with large text on physical phones.
+    capabilities_view = ft.Column(
+        key="capabilities-view", spacing=15,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
     screen_host = ft.Container(key="screen-host", content=connection_view)
     selected_tab = 0
 
@@ -246,7 +254,7 @@ def main(page: ft.Page) -> None:
 
     def tool_editor(item: dict[str, object]) -> list[ft.Control]:
         schema = _schema(item)
-        fields, controls = create_fields(schema)
+        fields, controls = create_fields(schema, on_change=page.update)
         for field in fields:
             tint_field(field)
         must_use_json = requires_advanced_json(schema)
@@ -772,8 +780,8 @@ def main(page: ft.Page) -> None:
                     text("Your workspace is ready", 17, bold=True),
                     text("Connect to an MCP endpoint to reveal its tools, prompts and resources.",
                          12, muted=True),
-                ], spacing=5),
-            ], spacing=16, wrap=True),
+                ], spacing=5, expand=True),
+            ], spacing=16),
             padding=24,
         )
         empty_state.visible = session is None
@@ -791,7 +799,7 @@ def main(page: ft.Page) -> None:
                         ], spacing=10),
                         ft.Divider(height=1, color=colors.outline),
                         list_column,
-                    ], spacing=13),
+                    ], spacing=13, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                     padding=14,
                 ),
                 col={"xs": 12, "sm": 12, "md": 4, "lg": 4},
@@ -812,7 +820,7 @@ def main(page: ft.Page) -> None:
                 ft.Column([
                     text("Capabilities", 18, bold=True),
                     text("Only what your server actually advertises.", 12, muted=True),
-                ], spacing=3),
+                ], spacing=3, expand=True),
             ], spacing=12),
             summary_row,
             navigation,

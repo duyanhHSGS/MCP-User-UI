@@ -2,6 +2,8 @@
 
 import base64
 import io
+from collections.abc import Callable
+from typing import cast
 
 import flet as ft
 from PIL import Image
@@ -9,7 +11,7 @@ import pytest
 
 from app import _name
 from rendering import _valid_png, content_views, preview
-from schema_form import create_fields, form_arguments, validate_tool_arguments
+from schema_form import (UnionField, create_fields, form_arguments, requires_advanced_json, union_branches, validate_tool_arguments)
 
 
 def test_primitive_form_and_constraints() -> None:
@@ -114,3 +116,159 @@ def test_schema_patterns_still_validate_and_report_invalid_patterns() -> None:
         validate_tool_arguments({"type": "object", "properties": {
             "code": {"type": "string", "pattern": "["},
         }}, {"code": "MCP"})
+
+
+def _deepwiki_schema(composition: str = "anyOf") -> dict[str, object]:
+    """A representative published DeepWiki ask_wiki_question input schema."""
+    return {
+        "type": "object",
+        "required": ["repoName", "question"],
+        "additionalProperties": False,
+        "properties": {
+            "repoName": {
+                composition: [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+                ],
+                "description": "GitHub repository or list of repositories",
+            },
+            "question": {"type": "string"},
+        },
+    }
+
+
+@pytest.mark.parametrize("composition", ["anyOf", "oneOf"])
+def test_deepwiki_union_form_uses_plain_inputs_without_raw_json(composition: str) -> None:
+    schema = _deepwiki_schema(composition)
+    assert not requires_advanced_json(schema)
+    views, fields = create_fields(schema)
+    assert len(views) == 2
+    repository = fields["repoName"]
+    assert isinstance(repository, UnionField)
+    assert repository.view is views[0]
+    assert isinstance(repository.selector, ft.Dropdown)
+    assert repository.selector.value == "0"
+    assert repository.inputs[0].visible
+    assert not repository.inputs[1].visible
+
+    single = repository.inputs[0]
+    question = fields["question"]
+    assert isinstance(single, ft.TextField)
+    assert isinstance(question, ft.TextField)
+    single.value = "facebook/react"
+    question.value = "How does reconciliation work?"
+    expected: dict[str, object] = {"repoName": "facebook/react", "question": "How does reconciliation work?"}
+    assert form_arguments(schema, fields) == expected
+    validate_tool_arguments(schema, expected)
+    with pytest.raises(ValueError, match="repoName"):
+        validate_tool_arguments(schema, {**expected, "repoName": 42})
+
+    repository.selector.value = "1"
+    assert repository.selector.on_select is not None
+    cast(Callable[[], None], repository.selector.on_select)()
+    assert not single.visible
+    multi = repository.inputs[1]
+    assert multi.visible and isinstance(multi, ft.TextField)
+    multi.value = "facebook/react\nvuejs/core"
+    expected["repoName"] = ["facebook/react", "vuejs/core"]
+    assert form_arguments(schema, fields) == expected
+    validate_tool_arguments(schema, expected)
+
+    multi.value = "facebook/react\n" * 11
+    with pytest.raises(ValueError, match="at most 10 items"):
+        form_arguments(schema, fields)
+
+
+def test_union_editing_switches_types_without_erasing_inactive_values() -> None:
+    schema = {"type": "object", "required": ["option"], "properties": {
+        "option": {"oneOf": [{"type": "integer"}, {"type": "boolean"}]},
+    }}
+    changed: list[str] = []
+    _, fields = create_fields(schema, on_change=lambda: changed.append("updated"))
+    option = fields["option"]
+    assert isinstance(option, UnionField)
+    integer = option.inputs[0]
+    assert isinstance(integer, ft.TextField)
+    integer.value = "7"
+    assert form_arguments(schema, fields) == {"option": 7}
+
+    option.selector.value = "1"
+    assert option.selector.on_select is not None
+    cast(Callable[[], None], option.selector.on_select)()
+    assert changed == ["updated"]
+    boolean = option.inputs[1]
+    assert isinstance(boolean, ft.Checkbox)
+    boolean.value = True
+    assert form_arguments(schema, fields) == {"option": True}
+
+    option.selector.value = "0"
+    cast(Callable[[], None], option.selector.on_select)()
+    assert integer.value == "7"
+    assert form_arguments(schema, fields) == {"option": 7}
+    assert changed == ["updated", "updated"]
+
+
+@pytest.mark.parametrize("composition", ["anyOf", "oneOf"])
+def test_schema_union_validation_checks_nested_types(composition: str) -> None:
+    schema = {"type": "object", "properties": {
+        "value": {composition: [
+            {"type": "string", "minLength": 3},
+            {"type": "array", "items": {"type": "integer"}, "minItems": 1},
+        ]},
+    }}
+    validate_tool_arguments(schema, {"value": "abc"})
+    validate_tool_arguments(schema, {"value": [1, 2]})
+    with pytest.raises(ValueError, match="value.*allowed type"):
+        validate_tool_arguments(schema, {"value": "ab"})
+    with pytest.raises(ValueError, match="value.*allowed type"):
+        validate_tool_arguments(schema, {"value": [1, "bad"]})
+    with pytest.raises(ValueError, match="value.*allowed type"):
+        validate_tool_arguments(schema, {"value": None})
+
+
+def test_unrepresentable_union_remains_advanced_json_only() -> None:
+    schemas = [
+        {"oneOf": [{"type": "string"}, {"type": "string"}]},
+        {"anyOf": [{"type": "integer"}, {"type": "number"}]},
+        {"oneOf": [{"type": "string"}]},
+        {"anyOf": [{"$ref": "#/$defs/example"}, {"type": "array"}]},
+        {"oneOf": [{"type": "string", "oneOf": [{"type": "string"}]}, {"type": "boolean"}]},
+    ]
+    for definition in schemas:
+        schema = {"type": "object", "required": ["value"],
+                  "properties": {"value": definition}}
+        assert union_branches(definition) is None
+        assert requires_advanced_json(schema)
+        assert create_fields(schema)[1] == {}
+
+
+def test_nullable_union_still_validates_null_and_rejects_invalid_values() -> None:
+    schema = {"type": "object", "properties": {
+        "nickname": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+    }}
+    validate_tool_arguments(schema, {"nickname": "human"})
+    validate_tool_arguments(schema, {"nickname": None})
+    with pytest.raises(ValueError, match="nickname.*allowed type"):
+        validate_tool_arguments(schema, {"nickname": 123})
+
+
+def test_multiple_union_selectors_control_only_their_own_field() -> None:
+    schema = {"type": "object", "required": ["first", "second"], "properties": {
+        "first": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+        "second": {"oneOf": [{"type": "string"}, {"type": "boolean"}]},
+    }}
+    views, fields = create_fields(schema)
+    assert len(views) == 2
+    first = fields["first"]
+    second = fields["second"]
+    assert isinstance(first, UnionField) and isinstance(second, UnionField)
+    first.selector.value = "1"
+    assert first.selector.on_select is not None
+    cast(Callable[[], None], first.selector.on_select)()
+    assert first.inputs[1].visible and not first.inputs[0].visible
+    assert second.inputs[0].visible and not second.inputs[1].visible
+    second.selector.value = "1"
+    assert second.selector.on_select is not None
+    cast(Callable[[], None], second.selector.on_select)()
+    assert first.inputs[1].visible and not first.inputs[0].visible
+    assert second.inputs[1].visible and not second.inputs[0].visible

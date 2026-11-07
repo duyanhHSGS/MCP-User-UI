@@ -379,7 +379,8 @@ def test_input_borders_preserve_palette_shape_and_focus_width(
     asyncio.run(exercise())
 
 
-def test_screen_changes_and_resize_keep_search_and_tool_results() -> None:
+@pytest.mark.parametrize("width", [320, 440, 859, 860, 1080])
+def test_screen_changes_and_resize_keep_search_and_tool_results(width: float) -> None:
     async def exercise() -> None:
         page, session = await _connect()
         search = cast(ft.TextField, find_control(page, "capability-search"))
@@ -397,9 +398,12 @@ def test_screen_changes_and_resize_keep_search_and_tool_results() -> None:
         assert find_control(page, "capability-search") is search
         assert search.value == "status"
         assert output.controls == result_controls
-        page.width = 400
+        page.width = width
         assert page.on_resize is not None
         page.on_resize(None)
+        assert _root(page).horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+        assert find_control(page, "capability-search") is search
+        assert search.value == "status" and not search.disabled
         assert find_control(page, "catalog-detail") is detail
         assert output.controls == result_controls
         assert len(session.tool_calls) == 1
@@ -475,5 +479,135 @@ def test_oauth_discovery_failure_never_marks_connection_ready(monkeypatch: pytes
         select_screen(page, 0)
         connection = cast(ft.Column, cast(ft.Container, find_control(page, "connection-card")).content)
         assert "Tool access denied" in cast(ft.Text, connection.controls[-1]).value
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("multiple_repositories", [False, True])
+def test_deepwiki_tool_uses_human_form_and_builds_valid_arguments(
+    catalog: Catalog, multiple_repositories: bool,
+) -> None:
+    """Click the real form widgets against a fake MCP server; never send a network call."""
+    catalog["tools/list"] = [{
+        "name": "ask_wiki_question",
+        "description": "Ask a question about GitHub repository code",
+        "inputSchema": {
+            "type": "object",
+            "required": ["repoName", "question"],
+            "additionalProperties": False,
+            "properties": {
+                "repoName": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "GitHub repository or list of repositories",
+                },
+                "question": {"type": "string"},
+            },
+        },
+    }]
+
+    async def exercise() -> None:
+        page, server = await _connect()
+        _, detail = _catalog_columns(page)
+        widgets = list(walk_controls(detail))
+        advanced = next(
+            widget for widget in widgets if isinstance(widget, ft.Checkbox)
+            and widget.label == "Advanced JSON arguments"
+        )
+        raw_json = next(
+            widget for widget in widgets if isinstance(widget, ft.TextField)
+            and widget.label == "Arguments as JSON object"
+        )
+        selector = next(
+            widget for widget in widgets if isinstance(widget, ft.Dropdown)
+            and widget.label == "repoName format"
+        )
+        single = next(
+            widget for widget in widgets if isinstance(widget, ft.TextField)
+            and widget.label == "repoName (string) *"
+        )
+        multiple = next(
+            widget for widget in widgets if isinstance(widget, ft.TextField)
+            and widget.label == "repoName — one item per line"
+        )
+        question = next(
+            widget for widget in widgets if isinstance(widget, ft.TextField)
+            and widget.label == "question (string) *"
+        )
+        assert not advanced.value
+        assert not raw_json.visible
+        assert selector.value == "0"
+        assert single.visible and not multiple.visible
+        single.value = "facebook/react"
+        question.value = "How does reconciliation work?"
+        repo_names: str | list[str] = "facebook/react"
+        if multiple_repositories:
+            selector.value = "1"
+            _fire(selector.on_select)
+            assert not single.visible and multiple.visible
+            multiple.value = "facebook/react\nvuejs/core"
+            repo_names = ["facebook/react", "vuejs/core"]
+
+        # Advanced JSON remains available and captures the human form's values.
+        advanced.value = True
+        _fire(advanced.on_change)
+        assert raw_json.visible
+        assert json.loads(raw_json.value) == {
+            "repoName": repo_names, "question": "How does reconciliation work?",
+        }
+        advanced.value = False
+        _fire(advanced.on_change)
+        assert not raw_json.visible
+
+        run = next(
+            widget for widget in widgets if isinstance(widget, ft.FilledButton)
+            and widget.content == "Run tool"
+        )
+        assert server.tool_calls == []
+        _fire(run.on_click)
+        await asyncio.gather(*page.tasks)
+        assert server.tool_calls == [(
+            "ask_wiki_question",
+            {"repoName": repo_names, "question": "How does reconciliation work?"},
+        )]
+
+    asyncio.run(exercise())
+
+
+def test_complex_required_union_still_shows_advanced_json(catalog: Catalog) -> None:
+    catalog["tools/list"] = [{
+        "name": "complex_union",
+        "inputSchema": {
+            "type": "object",
+            "required": ["value"],
+            "properties": {"value": {"oneOf": [
+                {"type": "string"}, {"type": "string", "minLength": 3},
+            ]}},
+        },
+    }]
+
+    async def exercise() -> None:
+        page, session = await _connect()
+        _, detail = _catalog_columns(page)
+        widgets = list(walk_controls(detail))
+        advanced = next(
+            widget for widget in widgets if isinstance(widget, ft.Checkbox)
+            and widget.label == "Advanced JSON arguments"
+        )
+        raw = next(
+            widget for widget in widgets if isinstance(widget, ft.TextField)
+            and widget.label == "Arguments as JSON object"
+        )
+        assert advanced.value is True and raw.visible
+        raw.value = '{"value": "ok"}'
+        run = next(
+            widget for widget in widgets if isinstance(widget, ft.FilledButton)
+            and widget.content == "Run tool"
+        )
+        _fire(run.on_click)
+        await asyncio.gather(*page.tasks)
+        assert session.tool_calls == [("complex_union", {"value": "ok"})]
 
     asyncio.run(exercise())

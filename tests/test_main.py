@@ -37,6 +37,41 @@ def test_starts_with_a_safe_disconnected_interface() -> None:
     assert not any(isinstance(control, ft.VerticalDivider) for control in workspace.controls)
 
 
+@pytest.mark.parametrize("width", [None, 0, 320, 360, 440, 859, 860, 1080])
+def test_search_and_discovery_fill_the_capabilities_screen(width: float | None) -> None:
+    page = FakePage()
+    page.width = width
+    main(cast(ft.Page, page))
+    select_screen(page, 1)
+    view = find_control(page, "capabilities-view")
+    search = find_control(page, "capability-search")
+    workspace = find_control(page, "capabilities-workspace")
+    assert isinstance(view, ft.Column)
+    assert view.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+    assert view.width is None
+    assert isinstance(search, ft.TextField)
+    assert search.width is None and not search.expand
+    assert search.label == "Search capabilities"
+    assert search.prefix_icon == ft.Icons.SEARCH
+    assert search.disabled
+    assert isinstance(workspace, ft.ResponsiveRow)
+    assert workspace.width is None
+    introduction = view.controls[0]
+    assert isinstance(introduction, ft.Row)
+    assert introduction.controls[-1].expand
+    empty = view.controls[-2]
+    assert isinstance(empty, ft.Container)
+    assert empty.visible and empty.width is None
+    assert isinstance(empty.content, ft.Row)
+    assert not empty.content.wrap
+    assert empty.content.controls[-1].expand
+    library = workspace.controls[0]
+    assert isinstance(library, ft.Container)
+    assert isinstance(library.content, ft.Container)
+    assert isinstance(library.content.content, ft.Column)
+    assert library.content.content.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+
+
 @pytest.mark.parametrize("palette", PALETTES)
 def test_palette_and_light_mode_update_real_material_3_surfaces(palette: str) -> None:
     page = FakePage()
